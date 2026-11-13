@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fleetd.models import Message
+from fleetd.models import Block, Inline, Message
 from fleetd.transcripts import TranscriptIndex, messages, summarize
 from tests.conftest import HIST_SID, SID, rec, write_transcript
 
@@ -39,7 +39,8 @@ def test_messages_skips_tool_results_and_sidechains(claude_home: Path) -> None:
 
     assert result == [
         Message(role="user", text="xin chào", ts="2026-11-13T12:00:00Z"),
-        Message(role="assistant", text="Chào bạn", ts="2026-11-13T12:00:05Z"),
+        Message(role="assistant", text="Chào bạn", ts="2026-11-13T12:00:05Z",
+                blocks=[Block(type="paragraph", inlines=[Inline(type="text", text="Chào bạn")])]),
         Message(role="tool", text="Bash: List files", ts="2026-11-13T12:00:05Z"),
     ]
 

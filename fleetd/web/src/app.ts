@@ -30,7 +30,21 @@ interface Machine {
   apiLevel: number; isSelf: boolean; appVersion: string | null;
 }
 interface Fleet { machines: Machine[] }
-interface Message { role: Role; text: string; ts: string | null }
+/** Markdown parsed by fleetd (fleetd/markdown.py); rendered with DOM nodes, never innerHTML. */
+type Inline =
+  | { type: "text" | "code"; text: string }
+  | { type: "strong" | "em"; children: Inline[] }
+  | { type: "link"; href: string; children: Inline[] };
+type Align = "left" | "center" | "right" | null;
+type Block =
+  | { type: "heading"; level: number; inlines: Inline[] }
+  | { type: "paragraph"; inlines: Inline[] }
+  | { type: "code"; lang: string | null; text: string }
+  | { type: "list"; ordered: boolean; start: number | null; items: Block[][] }
+  | { type: "quote"; children: Block[] }
+  | { type: "table"; align: Align[]; header: Inline[][]; rows: Inline[][][] }
+  | { type: "rule" };
+interface Message { role: Role; text: string; ts: string | null; blocks: Block[] | null }
 interface ActionResult { id: string | null; action: string; output: string }
 
 /** A session as shown in the list: plus which machine it belongs to. */
@@ -106,11 +120,53 @@ function parseMachine(v: unknown): Machine {
 
 const parseFleet = (v: unknown): Fleet => ({ machines: list(obj(v).machines).map(parseMachine) });
 
+const SAFE_HREF = /^(https?:|mailto:)/i;
+
+function parseInlines(v: unknown): Inline[] {
+  return list(v).flatMap((x): Inline[] => {
+    const o = obj(x);
+    const text = str(o.text) ?? "";
+    switch (o.type) {
+      case "text": case "code": return [{ type: o.type, text }];
+      case "strong": case "em": return [{ type: o.type, children: parseInlines(o.children) }];
+      case "link": {
+        const href = str(o.href);
+        const children = parseInlines(o.children);
+        // fleetd already drops unsafe schemes; an old or odd peer must not get past here either.
+        return href && SAFE_HREF.test(href) ? [{ type: "link", href, children }] : children;
+      }
+      default: return text ? [{ type: "text", text }] : [];
+    }
+  });
+}
+
+const parseAlign = (v: unknown): Align => (v === "left" || v === "center" || v === "right" ? v : null);
+
+function parseBlocks(v: unknown): Block[] {
+  return list(v).flatMap((x): Block[] => {
+    const o = obj(x);
+    switch (o.type) {
+      case "heading": return [{ type: "heading", level: Math.min(6, Math.max(1, num(o.level) ?? 3)), inlines: parseInlines(o.inlines) }];
+      case "paragraph": return [{ type: "paragraph", inlines: parseInlines(o.inlines) }];
+      case "code": return [{ type: "code", lang: str(o.lang), text: str(o.text) ?? "" }];
+      case "list": return [{ type: "list", ordered: bool(o.ordered), start: num(o.start), items: list(o.items).map(parseBlocks) }];
+      case "quote": return [{ type: "quote", children: parseBlocks(o.children) }];
+      case "table": return [{
+        type: "table", align: list(o.align).map(parseAlign), header: list(o.header).map(parseInlines),
+        rows: list(o.rows).map((r) => list(r).map(parseInlines)),
+      }];
+      case "rule": return [{ type: "rule" }];
+      default: return [];
+    }
+  });
+}
+
 function parseMessages(v: unknown): Message[] {
   return list(obj(v).messages).flatMap((m) => {
     const o = obj(m);
     const text = str(o.text);
-    return isRole(o.role) && text !== null ? [{ role: o.role, text, ts: str(o.ts) }] : [];
+    const blocks = Array.isArray(o.blocks) ? parseBlocks(o.blocks) : null;
+    return isRole(o.role) && text !== null ? [{ role: o.role, text, ts: str(o.ts), blocks }] : [];
   });
 }
 
@@ -492,9 +548,51 @@ function renderDrawerHead(): void {
   renderCompose(s);
 }
 
+function renderInlines(inlines: Inline[]): Node[] {
+  return inlines.map((i): Node => {
+    switch (i.type) {
+      case "text": return document.createTextNode(i.text);
+      case "code": return h("code", {}, i.text);
+      case "strong": return h("strong", {}, renderInlines(i.children));
+      case "em": return h("em", {}, renderInlines(i.children));
+      case "link": return h("a", { href: i.href, target: "_blank", rel: "noopener noreferrer" }, renderInlines(i.children));
+    }
+  });
+}
+
+const HEADING_TAGS = ["h3", "h3", "h4", "h5", "h6", "h6"] as const;  // h1/h2 belong to the page
+
+function cell(tag: "th" | "td", inlines: Inline[], align: Align | undefined): HTMLTableCellElement {
+  return h(tag, { style: align ? `text-align:${align}` : null }, renderInlines(inlines));
+}
+
+function renderBlock(b: Block): Node {
+  switch (b.type) {
+    case "heading": return h(HEADING_TAGS[b.level - 1] ?? "h6", { class: "md-h" }, renderInlines(b.inlines));
+    case "paragraph": return h("p", {}, renderInlines(b.inlines));
+    case "code": return h("pre", { class: "md-code", "data-lang": b.lang }, h("code", {}, b.text));
+    case "list": {
+      const items = b.items.map((item) => h("li", {}, renderBlocks(item)));
+      return b.ordered ? h("ol", { start: b.start != null && b.start !== 1 ? String(b.start) : null }, items) : h("ul", {}, items);
+    }
+    case "quote": return h("blockquote", {}, renderBlocks(b.children));
+    case "table": return h("div", { class: "md-table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, b.header.map((c, k) => cell("th", c, b.align[k])))),
+      h("tbody", {}, b.rows.map((r) => h("tr", {}, r.map((c, k) => cell("td", c, b.align[k])))))));
+    case "rule": return h("hr");
+  }
+}
+
+function renderBlocks(blocks: Block[]): Node[] {
+  return blocks.map(renderBlock);
+}
+
 function messageNode(m: Message): HTMLDivElement {
   if (m.role === "tool") return h("div", { class: "msg tool" }, `→ ${m.text}`);
-  return h("div", { class: `msg ${m.role}` }, h("div", { class: "who" }, `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`), m.text);
+  const who = h("div", { class: "who" }, `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`);
+  // Old fleetd peers send no blocks: keep their plain text.
+  if (m.blocks && m.blocks.length) return h("div", { class: `msg ${m.role} md` }, who, renderBlocks(m.blocks));
+  return h("div", { class: `msg ${m.role}` }, who, m.text);
 }
 
 async function loadTab(): Promise<void> {

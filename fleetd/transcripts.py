@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from fleetd import markdown
 from fleetd.models import Message, TranscriptSummary
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -102,7 +103,7 @@ def summarize(path: Path) -> TranscriptSummary:
         elif t == "continued-in":
             s.continued_in = _str(r.get("continuedInSessionId"))
         elif t == "assistant" and not r.get("isSidechain"):
-            s.last_reply = _text_of(_content(r)).strip() or s.last_reply
+            s.last_reply = markdown.to_plain(_text_of(_content(r))).strip() or s.last_reply
         elif _is_human(r):
             s.last_prompt = _text_of(_content(r))
         s.cwd = _str(r.get("cwd")) or s.cwd
@@ -133,7 +134,8 @@ def messages(path: Path, limit: int = 60) -> list[Message]:
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "text" and str(b.get("text", "")).strip():
-                out.append(Message(role="assistant", text=clip(str(b["text"]), 6000) or "", ts=ts))
+                text = clip(str(b["text"]), 6000) or ""
+                out.append(Message(role="assistant", text=text, ts=ts, blocks=markdown.parse(text)))
             elif b.get("type") == "tool_use":
                 out.append(Message(role="tool", text=_tool_line(b), ts=ts))
     return out[-limit:]

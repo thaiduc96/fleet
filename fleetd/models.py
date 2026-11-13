@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -151,10 +152,44 @@ class TranscriptSummary(ApiModel):
     continued_in: str | None = None
 
 
+class Inline(ApiModel):
+    """A span inside a paragraph, heading or table cell.
+
+    text/code carry `text`; strong/em/link carry `children`; link also `href`
+    (only http, https and mailto ever reach the dashboard).
+    """
+
+    type: Literal["text", "code", "strong", "em", "link"]
+    text: str = ""
+    children: list[Inline] = []
+    href: str | None = None
+
+
+Align = Literal["left", "center", "right"] | None
+
+
+class Block(ApiModel):
+    """One Markdown block, parsed server-side so the dashboard only builds DOM nodes."""
+
+    type: Literal["heading", "paragraph", "code", "list", "quote", "table", "rule"]
+    level: int | None = None              # heading 1-6
+    inlines: list[Inline] = []            # heading, paragraph
+    lang: str | None = None               # code
+    text: str | None = None               # code
+    ordered: bool = False                 # list
+    start: int | None = None              # ordered list first number
+    items: list[list[Block]] = []         # list: blocks of each item
+    children: list[Block] = []            # quote
+    align: list[Align] = []               # table
+    header: list[list[Inline]] = []       # table
+    rows: list[list[list[Inline]]] = []   # table
+
+
 class Message(ApiModel):
     role: str  # "user" | "assistant" | "tool"
     text: str
     ts: str | None = None
+    blocks: list[Block] | None = None  # assistant replies: parsed Markdown; None for plain text
 
 
 class Transcript(ApiModel):
