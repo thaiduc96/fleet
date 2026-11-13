@@ -593,6 +593,12 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     def index() -> HTMLResponse:
         return HTMLResponse(index_html, headers=NO_CACHE)
 
+    # At the root, not /static: a web app manifest's scope starts from where it is served.
+    @app.get("/manifest.webmanifest")
+    def manifest() -> Response:
+        return Response((WEB_DIR / "manifest.webmanifest").read_bytes(),
+                        media_type="application/manifest+json", headers=NO_CACHE)
+
     app.mount("/static", RevalidatedStaticFiles(directory=WEB_DIR), name="static")
     return app
 

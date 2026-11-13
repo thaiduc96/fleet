@@ -98,7 +98,7 @@ Fleet opens a short setup:
 The new machine introduces itself and learns about every other machine; the rest of the fleet learns about it within seconds.
 
 ### Your phone
-Install Tailscale on the phone, open `https://<your-mac>.<tailnet>.ts.net`, and sign in once with the fleet token. In Safari, *Share → Add to Home Screen* gives you an app-like icon.
+Install Tailscale on the phone and open `https://<your-mac>.<tailnet>.ts.net` in Safari. Choose *Share → Add to Home Screen*: Fleet installs as a web app with its own icon that opens full screen, without Safari's toolbars, and always runs the dashboard version of the Mac it points at. Sign in once inside the installed app with the fleet token (it keeps its own storage, separate from Safari).
 
 ### Coming from the script install
 Earlier versions were installed with `install.sh` and `bin/fleet`. Just run the installer above: Fleet.app reuses `~/.fleet`, the token in the Keychain, your machines and keep-awake settings, and `tailscale serve`. It replaces the old `com.fleet.fleetd` LaunchAgent only after its own fleetd is confirmed running, and restores it otherwise.
@@ -113,13 +113,19 @@ The icon shows the number of sessions waiting for you. The menu lists sessions t
 - **Session details** show the conversation and, for background sessions, the terminal. Both follow the session live: every 1.5 s while Claude works, every 4 s otherwise. A message you send appears at once, and a line shows which tool Claude is running. Tap a tool call to see its input and output. Buttons copy the `claude attach` and `claude --resume` commands.
 - **Attachments** (📎, paste, or drag and drop; up to 25 MB each) are uploaded to the machine that runs the session, saved under `~/.fleet/uploads/`, and their paths are added to your message, the same way Claude Code handles pasted images.
 - **＋ Session** starts `claude --bg` on the chosen machine. The folder must be inside your home directory and trusted by Claude Code. Remote sessions may use the `manual`, `auto`, `acceptEdits` or `plan` permission modes; modes that skip permission prompts are deliberately not offered.
-- **Replying** to a session continues the same session:
+- **Answering a running background session** works as in its terminal. Fleet attaches to the session (`claude attach` in a pseudo-terminal), reads the screen and presses keys for you:
+  - when Claude asks for **plan approval**, **permission** to run something, or asks a **question**, the menu appears in the conversation as buttons, with a text box for *Tell Claude what to change* or *Type something*;
+  - the **Mode** picker switches between manual, auto, accept edits and plan, like Shift+Tab;
+  - **Ngắt (Esc)** interrupts Claude, like Esc;
+  - the **Terminal** tab shows the live screen.
+
+  Only keys for an option that is on screen right now are ever pressed, and typed text cannot contain control keys.
+- **Replying** continues the same session:
 
   | Session state | What Fleet does |
   |---|---|
+  | Running in the background | types your message into it (queued while Claude works) |
   | Closed or stopped | `claude --bg --resume <id>` with your message |
-  | Running in the background, between turns | stops it, waits for the process to exit, then resumes |
-  | In the middle of a turn | refuses, unless you choose to interrupt it |
   | Open in a terminal | refuses — answer it there, or through Remote Control |
 
 ### Keeping a Mac awake
@@ -218,6 +224,8 @@ All endpoints require the fleet token, except `/api/hello` and the dashboard its
 | `GET /api/local` · `GET /api/health` | This machine's snapshot · health and keep-awake state |
 | `GET /api/sessions/<id>/transcript[?since=<version>]` · `/logs` | Conversation (`unchanged: true` when nothing changed since `version`) · terminal output |
 | `POST /api/uploads?name=<file name>` | Save an attachment (raw body, max 25 MB); returns its path |
+| `GET /api/sessions/<id>/screen` | A running background session's screen: text, mode, the menu it waits on |
+| `POST /api/sessions/<id>/input` | `{"input": …}`: `choose` an option (with `text`), `key: "esc"`, `mode`, or `type` a message |
 | `POST /api/sessions` | Start a background session |
 | `POST /api/sessions/<id>/message` · `/stop` · `/respawn` · `DELETE /api/sessions/<id>` | Reply · stop · restart · remove |
 | `POST /api/awake` | Keep-awake mode: `off`, `ac`, `always` |
@@ -230,4 +238,6 @@ All endpoints require the fleet token, except `/api/hello` and the dashboard its
 - Apple silicon Macs only, macOS 14 or later.
 - Fleet reads files that are internal to Claude Code. A Claude Code update can change them; the affected code is isolated so it can be fixed quickly.
 - Moving sessions between Macs is experimental and does not move code.
+- Answering menus relies on how Claude Code's terminal looks. If a Claude Code update changes it, Fleet shows no buttons (it never guesses); the terminal and `claude attach` still work.
+- On the iPhone, notifications only appear while the dashboard is open; background push needs a push service and is not included yet.
 - Releases are not notarized by Apple, so a manually downloaded archive needs *right-click → Open* the first time; the installer and the built-in updater are not affected.
