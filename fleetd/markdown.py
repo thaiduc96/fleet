@@ -13,6 +13,7 @@ not recognised stays plain text.
 from __future__ import annotations
 
 import re
+import string
 
 from fleetd.models import Align, Block, Inline
 
@@ -20,14 +21,15 @@ MAX_DEPTH = 4  # nested lists/quotes deeper than this are kept as plain text
 SAFE_SCHEMES = ("http://", "https://", "mailto:")
 
 FENCE_RE = re.compile(r"^(\s{0,3})(`{3,}|~{3,})\s*([\w.+#-]*)")
-HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")  # "# C#" keeps its "#"
 RULE_RE = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
 LIST_RE = re.compile(r"^(\s*)([-*+]|(\d{1,9})[.)])\s+(.*)$")
 QUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
 DELIM_CELL_RE = re.compile(r"^\s*(:?)-{1,}(:?)\s*$")
 BARE_URL_RE = re.compile(r"https?://[^\s<>()\[\]`]+[^\s<>()\[\]`.,;:!?'\"]")
 # href allows one level of balanced parentheses: [x](https://en.wikipedia.org/wiki/A_(b))
-LINK_RE = re.compile(r"\[([^\]]*)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+\"[^\"]*\")?\s*\)")
+LINK_RE = re.compile(r"\[([^\]]*)\]\(\s*(<[^<>\s]+>|(?:[^()\s<]|\([^()\s]*\))+)(?:\s+\"[^\"]*\")?\s*\)")
+ESCAPABLE = frozenset(string.punctuation)  # CommonMark: only ASCII punctuation can be escaped
 
 
 # ---------------------------------------------------------------- inline
@@ -64,6 +66,9 @@ def parse_inlines(s: str, depth: int = 0) -> list[Inline]:
     out: list[Inline] = []
     buf: list[str] = []
     i, n = 0, len(s)
+    # Once no closer exists after position p for a delimiter, none exists after any later
+    # opener either: remembering p keeps "*a *b *c …" linear instead of quadratic.
+    no_closer_from: dict[str, int] = {}
 
     def flush() -> None:
         if buf:
@@ -72,7 +77,7 @@ def parse_inlines(s: str, depth: int = 0) -> list[Inline]:
 
     while i < n:
         c = s[i]
-        if c == "\\" and i + 1 < n and not s[i + 1].isalnum():  # escaped punctuation
+        if c == "\\" and i + 1 < n and s[i + 1] in ESCAPABLE:
             buf.append(s[i + 1])
             i += 2
             continue
@@ -88,7 +93,7 @@ def parse_inlines(s: str, depth: int = 0) -> list[Inline]:
             m = LINK_RE.match(s, i)
             if m:
                 flush()
-                label, href = m.group(1), m.group(2)
+                label, href = m.group(1), m.group(2).removeprefix("<").removesuffix(">")
                 kids = parse_inlines(label, depth + 1) or [_text(href)]
                 if href.lower().startswith(SAFE_SCHEMES):
                     out.append(Inline(type="link", href=href, children=kids))
@@ -102,8 +107,12 @@ def parse_inlines(s: str, depth: int = 0) -> list[Inline]:
             prev = s[i - 1] if i else " "
             nxt = s[i + len(delim)] if i + len(delim) < n else " "
             # "_" inside a word (snake_case) is never emphasis; an opener must touch text.
-            if not nxt.isspace() and not (c == "_" and prev.isalnum()):
-                end = _closing(s, i + len(delim), delim)
+            start = i + len(delim)
+            can_open = not nxt.isspace() and not (c == "_" and prev.isalnum())
+            if can_open and start < no_closer_from.get(delim, n + 1):
+                end = _closing(s, start, delim)
+                if end == -1:
+                    no_closer_from[delim] = start
                 after = s[end + len(delim)] if end != -1 and end + len(delim) < n else " "
                 if end != -1 and not (c == "_" and after.isalnum()):
                     flush()
@@ -175,15 +184,21 @@ def _is_table_start(lines: list[str], i: int) -> bool:
 def _table(lines: list[str], i: int) -> tuple[Block, int]:
     header = split_row(lines[i])
     aligns = _delimiter(lines[i + 1]) or []
-    width = len(header)
-    aligns = (aligns + [None] * width)[:width]
-    rows: list[list[list[Inline]]] = []
+    raw_rows: list[list[str]] = []
     j = i + 2
     while j < len(lines) and lines[j].strip() and "|" in lines[j]:
-        cells = (split_row(lines[j]) + [""] * width)[:width]
-        rows.append([parse_inlines(c) for c in cells])
+        raw_rows.append(split_row(lines[j]))
         j += 1
-    return Block(type="table", align=aligns, header=[parse_inlines(c) for c in header], rows=rows), j
+    # GFM drops cells beyond the header; here the table widens so no text is lost.
+    width = max([len(header), *(len(r) for r in raw_rows)])
+    rows = [[parse_inlines(c) for c in _pad(r, width)] for r in raw_rows]
+    aligns = (aligns + [None] * width)[:width]
+    head = [parse_inlines(c) for c in _pad(header, width)]
+    return Block(type="table", align=aligns, header=head, rows=rows), j
+
+
+def _pad(cells: list[str], width: int) -> list[str]:
+    return cells + [""] * (width - len(cells))
 
 
 # ---------------------------------------------------------------- blocks

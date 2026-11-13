@@ -769,8 +769,8 @@ const PENDING_TTL_MS = 3 * 60 * 1000;
 const TRANSCRIPT_LIMIT = 200;
 const NEAR_BOTTOM_PX = 80;
 
-/** A message sent from here that the transcript does not show yet. */
-interface Pending { text: string; at: number; seen: number }
+/** A message sent from here that the transcript does not show yet; `after` = last message id at send. */
+interface Pending { text: string; at: number; after: string | null }
 interface Live {
   key: string; version: string; timer: number; busy: boolean; loaded: boolean;
   messages: Message[]; nodes: Map<string, { sig: string; node: HTMLElement }>;
@@ -780,7 +780,11 @@ let live: Live | null = null;
 
 const liveKey = (s: Row, tab: Tab): string => `${s.machine}/${s.sessionId ?? s.id}/${tab}`;
 const sameText = (a: string, b: string): boolean => a.trim().startsWith(b.trim().slice(0, 200));
-const userCopies = (msgs: Message[], text: string): number => msgs.filter((m) => m.role === "user" && sameText(m.text, text)).length;
+/** Has `p` shown up? Only messages newer than the send count, so a repeated "ok" is not mistaken for it. */
+function arrived(msgs: Message[], p: Pending): boolean {
+  const from = p.after ? msgs.findIndex((m) => m.id === p.after) : -1;  // -1: scrolled out, all are newer
+  return msgs.slice(from + 1).some((m) => m.role === "user" && sameText(m.text, p.text));
+}
 
 function stopLive(): void {
   if (live) clearTimeout(live.timer);
@@ -877,13 +881,15 @@ function workingNode(msgs: Message[]): HTMLDivElement | null {
 function renderConversation(cur: Live, toBottom: boolean): void {
   const msgs = cur.messages;
   const now = Date.now();
-  cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && userCopies(msgs, p.text) <= p.seen);
+  cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && !arrived(msgs, p));
   const next = new Map<string, { sig: string; node: HTMLElement }>();
   const nodes: Node[] = msgs.map((m, k) => {
     const id = m.id ?? `i${k}`;
     const sig = JSON.stringify(m);
     const old = cur.nodes.get(id);
     const node = old?.sig === sig ? old.node : messageNode(m);
+    const who = node.querySelector(":scope > .who");
+    if (node === old?.node && who && m.role !== "tool") who.textContent = `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`;
     if (old && old.node !== node && old.node.querySelector("details")?.open) {
       node.querySelector("details")?.setAttribute("open", "");
     }
@@ -900,6 +906,7 @@ function renderConversation(cur: Live, toBottom: boolean): void {
 }
 
 function openDrawer(row: Row): void {
+  if (drawer && liveKey(drawer.row, drawer.tab) !== liveKey(row, "transcript")) stopLive();  // no stale model/tokens in the head
   drawer = { row, tab: "transcript" };
   el("drawer", HTMLDivElement).hidden = false;
   renderDrawerHead();
@@ -921,7 +928,7 @@ async function sendMessage(e: Event): Promise<void> {
   // Show the message at once, as a terminal would; stopping/resuming the session takes seconds.
   const typed = text.value;
   const shownIn = live && drawer.tab === "transcript" ? live : null;
-  const bubble: Pending = { text: typed, at: Date.now(), seen: shownIn ? userCopies(shownIn.messages, typed) : 0 };
+  const bubble: Pending = { text: typed, at: Date.now(), after: shownIn?.messages.at(-1)?.id ?? null };
   if (shownIn) { shownIn.pending.push(bubble); renderConversation(shownIn, true); }
   try {
     const paths = await messageFiles?.upload(s.machine) ?? [];

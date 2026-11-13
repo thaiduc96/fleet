@@ -713,7 +713,11 @@ const NEAR_BOTTOM_PX = 80;
 let live = null;
 const liveKey = (s, tab) => `${s.machine}/${s.sessionId ?? s.id}/${tab}`;
 const sameText = (a, b) => a.trim().startsWith(b.trim().slice(0, 200));
-const userCopies = (msgs, text) => msgs.filter((m) => m.role === "user" && sameText(m.text, text)).length;
+/** Has `p` shown up? Only messages newer than the send count, so a repeated "ok" is not mistaken for it. */
+function arrived(msgs, p) {
+    const from = p.after ? msgs.findIndex((m) => m.id === p.after) : -1; // -1: scrolled out, all are newer
+    return msgs.slice(from + 1).some((m) => m.role === "user" && sameText(m.text, p.text));
+}
 function stopLive() {
     if (live)
         clearTimeout(live.timer);
@@ -820,13 +824,16 @@ function workingNode(msgs) {
 function renderConversation(cur, toBottom) {
     const msgs = cur.messages;
     const now = Date.now();
-    cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && userCopies(msgs, p.text) <= p.seen);
+    cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && !arrived(msgs, p));
     const next = new Map();
     const nodes = msgs.map((m, k) => {
         const id = m.id ?? `i${k}`;
         const sig = JSON.stringify(m);
         const old = cur.nodes.get(id);
         const node = old?.sig === sig ? old.node : messageNode(m);
+        const who = node.querySelector(":scope > .who");
+        if (node === old?.node && who && m.role !== "tool")
+            who.textContent = `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`;
         if (old && old.node !== node && old.node.querySelector("details")?.open) {
             node.querySelector("details")?.setAttribute("open", "");
         }
@@ -843,6 +850,8 @@ function renderConversation(cur, toBottom) {
     keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(...nodes), toBottom);
 }
 function openDrawer(row) {
+    if (drawer && liveKey(drawer.row, drawer.tab) !== liveKey(row, "transcript"))
+        stopLive(); // no stale model/tokens in the head
     drawer = { row, tab: "transcript" };
     el("drawer", HTMLDivElement).hidden = false;
     renderDrawerHead();
@@ -865,7 +874,7 @@ async function sendMessage(e) {
     // Show the message at once, as a terminal would; stopping/resuming the session takes seconds.
     const typed = text.value;
     const shownIn = live && drawer.tab === "transcript" ? live : null;
-    const bubble = { text: typed, at: Date.now(), seen: shownIn ? userCopies(shownIn.messages, typed) : 0 };
+    const bubble = { text: typed, at: Date.now(), after: shownIn?.messages.at(-1)?.id ?? null };
     if (shownIn) {
         shownIn.pending.push(bubble);
         renderConversation(shownIn, true);

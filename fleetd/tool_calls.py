@@ -70,12 +70,17 @@ def detail(name: str, inp: Json) -> str | None:
     return _clip(out, DETAIL_CHARS) if out.strip() else None
 
 
+def _list(v: object) -> list[object]:
+    """A list field of tool input; anything else (a stray number, a string) counts as empty."""
+    return v if isinstance(v, list) else []
+
+
 def _questions(inp: Json) -> list[Question]:
     out: list[Question] = []
-    for q in inp.get("questions") or []:
+    for q in _list(inp.get("questions")):
         if not isinstance(q, dict) or not _s(q.get("question")):
             continue
-        options = [_s(o.get("label")) if isinstance(o, dict) else _s(o) for o in q.get("options") or []]
+        options = [_s(o.get("label")) if isinstance(o, dict) else _s(o) for o in _list(q.get("options"))]
         out.append(Question(question=_s(q.get("question")), header=_s(q.get("header")) or None,
                             options=[o for o in options if o]))
     return out
@@ -91,7 +96,7 @@ def _todo_status(v: object) -> TodoStatus:
 
 def _todos(inp: Json) -> list[Todo]:
     out: list[Todo] = []
-    for t in inp.get("todos") or []:
+    for t in _list(inp.get("todos")):
         if isinstance(t, dict) and _s(t.get("content")):
             out.append(Todo(content=_s(t["content"]), status=_todo_status(t.get("status"))))
     return out

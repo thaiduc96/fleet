@@ -98,7 +98,7 @@ def summarize(path: Path) -> TranscriptSummary:
         elif t == "continued-in":
             s.continued_in = _str(r.get("continuedInSessionId"))
         elif t == "assistant" and not r.get("isSidechain"):
-            s.last_reply = markdown.to_plain(_text_of(_content(r))).strip() or s.last_reply
+            s.last_reply = _text_of(_content(r)).strip() or s.last_reply
         elif _is_human(r):
             s.last_prompt = _text_of(_content(r))
         s.cwd = _str(r.get("cwd")) or s.cwd
@@ -108,7 +108,7 @@ def summarize(path: Path) -> TranscriptSummary:
     if not s.updated_at:
         s.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
     s.last_prompt = clip(s.last_prompt, 300)
-    s.last_reply = clip(s.last_reply, 400)
+    s.last_reply = clip(markdown.to_plain(s.last_reply) if s.last_reply else None, 400)
     return s
 
 
@@ -168,8 +168,7 @@ def conversation(path: Path, limit: int = 60) -> Conversation:
                 continue
             if b.get("type") == "text" and str(b.get("text", "")).strip():
                 text = clip(str(b["text"]), ASSISTANT_CHARS) or ""
-                out.append(Message(role="assistant", id=f"{rid}:{k}", ts=ts, text=text,
-                                   blocks=markdown.parse(text)))
+                out.append(Message(role="assistant", id=f"{rid}:{k}", ts=ts, text=text))
             elif b.get("type") == "tool_use":
                 inp = b.get("input")
                 name = _str(b.get("name")) or "tool"
@@ -177,7 +176,9 @@ def conversation(path: Path, limit: int = 60) -> Conversation:
                 out.append(Message(role="tool", id=f"{rid}:{k}", ts=ts,
                                    text=tool_calls.title(name, inp if isinstance(inp, dict) else {}),
                                    tool=tool_calls.describe(b, result)))
-    return Conversation(messages=out[-limit:], model=model, context_tokens=context)
+    kept = [m.model_copy(update={"blocks": markdown.parse(m.text)}) if m.role == "assistant" else m
+            for m in out[-limit:]]
+    return Conversation(messages=kept, model=model, context_tokens=context)
 
 
 def messages(path: Path, limit: int = 60) -> list[Message]:

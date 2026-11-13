@@ -73,3 +73,12 @@ def test_result_with_text_and_image_blocks() -> None:
 ])
 def test_title_is_one_line(inp: dict[str, object], expected: str) -> None:
     assert title("Bash", inp) == expected
+
+
+@pytest.mark.parametrize("name", ["TodoWrite", "AskUserQuestion"])
+@pytest.mark.parametrize("inp", [{"todos": 7}, {"todos": True}, {"todos": "xy"}, {"questions": 5},
+                                 {"questions": "abc"}, {"questions": [{"question": "q", "options": 3}]}])
+def test_malformed_tool_input_is_ignored_instead_of_raising(name: str, inp: dict[str, object]) -> None:
+    call = describe({"name": name, "input": inp}, None)
+
+    assert call.todos == [] and all(q.options == [] for q in call.questions)

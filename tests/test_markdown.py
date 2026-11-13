@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from fleetd import markdown
@@ -45,9 +47,9 @@ def test_pipe_inside_code_or_escaped_does_not_split_a_cell() -> None:
     assert [plain(c) for c in table.rows[0]] == ["x|y", "c | d"]
 
 
-def test_short_and_long_table_rows_are_padded_and_cut_to_header_width() -> None:
+def test_short_rows_are_padded_and_long_rows_widen_the_table() -> None:
     table = only(markdown.parse("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |"), "table")
-    assert [[plain(c) for c in r] for r in table.rows] == [["1", ""], ["1", "2"]]
+    assert [[plain(c) for c in r] for r in table.rows] == [["1", "", ""], ["1", "2", "3"]]
 
 
 @pytest.mark.parametrize(("source", "lang"), [("```python\nx = 1\n```", "python"), ("```\nx = 1\n```", None)])
@@ -122,3 +124,36 @@ def test_to_plain_strips_markers_for_previews() -> None:
     text = markdown.to_plain(COMPARISON)
     assert "|" not in text and "**" not in text and "`" not in text
     assert "Fleet.app · 1.0.0 · 1.0.0" in text
+
+
+@pytest.mark.parametrize("source", ["*.py " * 10000, "*a " * 10000, "_x " * 10000, "char *a, *b, " * 4000])
+def test_unclosed_emphasis_runs_parse_in_linear_time(source: str) -> None:
+    started = time.perf_counter()
+
+    (para,) = markdown.parse(source)
+
+    assert time.perf_counter() - started < 1.0
+    assert plain(para.inlines) == source.strip()
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("# C#", "C#"),
+    ("## Title ##", "Title"),
+    ("C:\\ path", "C:\\ path"),
+    ("a \\* b", "a * b"),
+])
+def test_headings_and_backslashes_keep_their_text(source: str, expected: str) -> None:
+    assert markdown.to_plain(source) == expected
+
+
+def test_table_rows_wider_than_the_header_keep_their_extra_cells() -> None:
+    table = only(markdown.parse("| a |\n|---|\n| b | c |"), "table")
+
+    assert [[plain(c) for c in r] for r in table.rows] == [["b", "c"]]
+    assert [plain(c) for c in table.header] == ["a", ""]
+
+
+def test_link_with_angle_brackets_keeps_its_href() -> None:
+    (para,) = markdown.parse("[a](<https://x.example/p>)")
+
+    assert para.inlines[0].href == "https://x.example/p"
