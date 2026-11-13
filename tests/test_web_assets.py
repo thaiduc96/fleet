@@ -58,3 +58,24 @@ def app_js_version(html: str) -> str:
     m = re.search(r'app\.js\?v=([0-9a-f]{8})"', html)
     assert m, html
     return m.group(1)
+
+
+def test_the_dashboard_is_an_installable_web_app(make_client: MakeClient) -> None:
+    c = make_client()
+
+    r = c.get("/manifest.webmanifest")
+
+    manifest = r.json()
+    assert (r.status_code, r.headers["content-type"]) == (200, "application/manifest+json")
+    assert (manifest["display"], manifest["start_url"]) == ("standalone", "/")
+    assert [c.get(icon["src"]).status_code for icon in manifest["icons"]] == [200, 200, 200]
+
+
+def test_index_links_the_manifest_and_the_ios_icon(make_client: MakeClient) -> None:
+    c = make_client()
+
+    html = c.get("/").text
+
+    assert '<link rel="manifest" href="/manifest.webmanifest">' in html
+    assert '<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">' in html
+    assert c.get("/static/icons/apple-touch-icon.png").headers["content-type"] == "image/png"

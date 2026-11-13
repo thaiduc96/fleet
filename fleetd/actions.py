@@ -107,6 +107,21 @@ class Actions:
         out = self._call("rm", ident, self.cli.remove, check_id(ident))
         return ActionResult(action="rm", id=ident, output=out)
 
+    def live_background(self, ident: str) -> tuple[str, SessionState]:
+        """Short id and state of a running background session: the only kind `claude attach` can drive."""
+        check_id(ident)
+        try:
+            agents = self.cli.agents(max_age=0)
+        except CLIError as e:
+            raise from_cli_error(e) from e
+        entry = next((a for a in agents if ident in (a.get("id"), a.get("sessionId"))), None)
+        if entry is None or not entry.get("pid"):
+            raise ActionError(409, "Session không chạy. Gửi tin nhắn để mở lại nó.")
+        if entry.get("kind") != "background":
+            raise ActionError(409, "Session đang mở trong terminal; hãy trả lời ở đó "
+                                   "hoặc qua Remote Control (claude.ai/code).")
+        return str(entry["id"]), normalize_state(entry)
+
     def start(self, body: NewSessionBody) -> ActionResult:
         cwd = safe_dir(body.cwd, self.home)
         mode = body.permission_mode or None

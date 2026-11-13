@@ -40,6 +40,10 @@ AgentEntry = dict[str, object]
 
 def normalize_state(entry: AgentEntry) -> SessionState:
     state = str(entry.get("state") or "").lower()
+    status = str(entry.get("status") or "").lower()
+    if state == "working" and status == "idle":
+        # An interrupted turn (Esc) leaves state "working" while the session waits for input.
+        return SessionState.IDLE
     if state in _STATE_MAP:
         return _STATE_MAP[state]
     if state:

@@ -12,6 +12,9 @@ from tests.conftest import FakeClaude
     ({"state": "blocked"}, SessionState.NEEDS_INPUT),
     ({"state": "needs_input"}, SessionState.NEEDS_INPUT),
     ({"state": "working"}, SessionState.WORKING),
+    ({"state": "working", "status": "busy"}, SessionState.WORKING),
+    # After Esc the daemon keeps state "working" while the TUI waits for input (2.1.323).
+    ({"state": "working", "status": "idle"}, SessionState.IDLE),
     ({"state": "failed"}, SessionState.FAILED),
     ({"state": "stopped"}, SessionState.STOPPED),
     ({"state": "idle"}, SessionState.IDLE),
