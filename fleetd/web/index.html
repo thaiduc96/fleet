@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fleet">
+<meta name="theme-color" content="#111418" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<title>Fleet</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23d97757'/><path d='M8 11h16M8 16h11M8 21h7' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form">
+    <h1>Fleet</h1>
+    <p>Nhập token (lấy bằng <code>bin/fleet token show</code> trên máy chạy fleetd).</p>
+    <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
+    <button type="submit">Đăng nhập</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <h1>Fleet</h1>
+    <input id="q" type="search" placeholder="Tìm session…" aria-label="Tìm session">
+    <label class="toggle"><input id="show-history" type="checkbox"> Lịch sử</label>
+    <button id="new-session" class="primary" title="Tạo session mới">＋ Session</button>
+    <button id="notify" class="ghost" title="Bật thông báo">🔔</button>
+    <span id="updated" class="muted"></span>
+  </header>
+  <section id="machines" class="machines"></section>
+  <main id="groups"></main>
+</div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <header>
+      <div>
+        <h2 id="d-title"></h2>
+        <div id="d-meta" class="muted"></div>
+      </div>
+      <button id="d-close" class="ghost icon-close" aria-label="Đóng">✕</button>
+    </header>
+    <div class="tabs" role="tablist">
+      <button data-tab="transcript" class="active" role="tab">Hội thoại</button>
+      <button data-tab="logs" role="tab">Terminal</button>
+    </div>
+    <div id="d-actions" class="actions"></div>
+    <div id="d-body" class="d-body"></div>
+    <form id="d-compose" class="compose" hidden>
+      <textarea id="d-text" rows="2" placeholder="Gửi tiếp chỉ thị cho session này…" required></textarea>
+      <div class="compose-row">
+        <label id="d-force-wrap" class="toggle" hidden><input id="d-force" type="checkbox"> Dừng rồi gửi</label>
+        <span id="d-compose-note" class="muted"></span>
+        <button type="submit" class="primary">Gửi</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <form id="new-form" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="n-title">
+    <header><h2 id="n-title">Session mới</h2><button type="button" id="n-close" class="ghost icon-close" aria-label="Đóng">✕</button></header>
+    <label>Máy <select id="n-machine" required></select></label>
+    <label>Thư mục <input id="n-cwd" list="n-cwds" placeholder="~/Documents/code/…" required autocomplete="off"></label>
+    <datalist id="n-cwds"></datalist>
+    <div class="grid2">
+      <label>Tên (tuỳ chọn) <input id="n-name" maxlength="80"></label>
+      <label>Quyền
+        <select id="n-mode">
+          <option value="">mặc định</option>
+          <option value="auto">auto</option>
+          <option value="acceptEdits">acceptEdits</option>
+          <option value="plan">plan</option>
+          <option value="manual">manual</option>
+        </select>
+      </label>
+    </div>
+    <label>Prompt <textarea id="n-prompt" rows="5" required></textarea></label>
+    <p class="muted">Chạy <code>claude --bg</code> trên máy đã chọn. Thư mục phải nằm trong home và đã được trust.</p>
+    <div class="compose-row"><span></span><button type="submit" class="primary">Bắt đầu</button></div>
+  </form>
+</div>
+
+<div id="handoff" class="modal" hidden>
+  <form id="handoff-form" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="h-title">
+    <header><h2 id="h-title">Chuyển session</h2><button type="button" id="h-close" class="ghost icon-close" aria-label="Đóng">✕</button></header>
+    <p id="h-route" class="muted"></p>
+    <div id="h-preview" class="preview" aria-live="polite"></div>
+    <label>Thư mục trên máy đích <input id="h-cwd" autocomplete="off"></label>
+    <label>Tin nhắn để chạy tiếp ở máy đích (tuỳ chọn)
+      <textarea id="h-message" rows="3" placeholder="Bỏ trống: chỉ chuyển hội thoại, chưa chạy"></textarea>
+    </label>
+    <div class="compose-row">
+      <label id="h-force-wrap" class="toggle" hidden><input id="h-force" type="checkbox"> Ngắt lượt đang chạy</label>
+      <label id="h-overwrite-wrap" class="toggle" hidden><input id="h-overwrite" type="checkbox"> Ghi đè bản ở máy đích</label>
+    </div>
+    <p class="muted">Thử nghiệm. Chỉ hội thoại được chuyển — code phải được push ở máy nguồn và pull ở máy đích. Bản ở máy nguồn vẫn được giữ.</p>
+    <div class="compose-row"><button type="button" id="h-recheck">Kiểm tra lại</button><button type="submit" class="primary" id="h-go">Chuyển</button></div>
+  </form>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+#!/bin/bash
+# fleet — setup helper for fleetd on this Mac.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FLEET_HOME="${FLEET_HOME:-$HOME/.fleet}"
+CONFIG="$FLEET_HOME/config.toml"
+VENV="$FLEET_HOME/venv"
+LABEL_ID="com.fleet.fleetd"
+PLIST="$HOME/Library/LaunchAgents/$LABEL_ID.plist"
+KC_SERVICE="fleet.token"
+KC_ACCOUNT="fleet"
+# No config yet on a fresh machine: with pipefail a failing sed would silently abort the script.
+PORT=""
+if [[ -f "$CONFIG" ]]; then PORT="$(sed -n 's/^port *= *\([0-9]*\).*/\1/p' "$CONFIG" | head -1)"; fi
+PORT="${PORT:-7777}"
+
+die() { echo "fleet: $*" >&2; exit 1; }
+
+token_get() { security find-generic-password -s "$KC_SERVICE" -a "$KC_ACCOUNT" -w 2>/dev/null; }
+token_put() { security add-generic-password -U -s "$KC_SERVICE" -a "$KC_ACCOUNT" -w "$1" >/dev/null; }
+
+cmd_token() {
+  case "${1:-show}" in
+    init)
+      if token_get >/dev/null; then echo "Token đã có (dùng 'fleet token show')."; return; fi
+      token_put "$(openssl rand -hex 24)"; echo "Đã tạo token và lưu vào Keychain ($KC_SERVICE)."
+      echo "Trên máy còn lại chạy: bin/fleet token set <token>  (xem token: bin/fleet token show)";;
+    set)  [[ -n "${2:-}" ]] || die "usage: fleet token set <token>"; token_put "$2"; echo "Đã lưu token.";;
+    show) token_get || die "chưa có token — chạy 'fleet token init'";;
+    *) die "usage: fleet token init|set <token>|show";;
+  esac
+}
+
+cmd_config() {
+  mkdir -p "$FLEET_HOME"
+  if [[ -f "$CONFIG" ]]; then echo "$CONFIG đã tồn tại:"; cat "$CONFIG"; return; fi
+  local machine="${1:-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
+  local label="${2:-$machine}"
+  local claude_bin; claude_bin="$(command -v claude || echo "$HOME/.local/bin/claude")"
+  cat > "$CONFIG" <<EOF
+machine = "$machine"
+label = "$label"
+port = 7777
+claude_bin = "$claude_bin"
+
+# Thêm máy khác bằng: bin/fleet peer add <name> <https://máy-kia.tailnet.ts.net> "<label>"
+EOF
+  echo "Đã tạo $CONFIG"
+}
+
+cmd_peer() {
+  [[ "${1:-}" == "add" && -n "${2:-}" && -n "${3:-}" ]] || die 'usage: fleet peer add <name> <url> ["label"]'
+  [[ -f "$CONFIG" ]] || cmd_config
+  grep -q "^name = \"$2\"" "$CONFIG" && die "peer $2 đã có trong $CONFIG"
+  printf '\n[[peers]]\nname = "%s"\nlabel = "%s"\nurl = "%s"\n' "$2" "${4:-$2}" "${3%/}" >> "$CONFIG"
+  echo "Đã thêm peer $2 → $3. Chạy 'bin/fleet restart'."
+}
+
+cmd_install() {
+  # The agent runs in $FLEET_HOME, never in the repo: ~/Documents is privacy-protected
+  # (a background Python touching it blocks on an invisible TCC consent prompt) and
+  # often iCloud-synced.
+  [[ -x "$VENV/bin/fleetd" ]] || die "chưa có $VENV — chạy ./install.sh"
+  token_get >/dev/null || die "chưa có token — chạy 'fleet token init' hoặc 'fleet token set <token>'"
+  [[ -f "$CONFIG" ]] || cmd_config
+  mkdir -p "$HOME/Library/LaunchAgents" "$FLEET_HOME"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL_ID</string>
+  <key>ProgramArguments</key><array><string>$VENV/bin/fleetd</string></array>
+  <key>WorkingDirectory</key><string>$FLEET_HOME</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$FLEET_HOME/fleetd.log</string>
+  <key>StandardErrorPath</key><string>$FLEET_HOME/fleetd.log</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$LABEL_ID" 2>/dev/null || true
+  # bootout is asynchronous; bootstrapping while the old job is still unloading
+  # fails with "Bootstrap failed: 5: Input/output error".
+  local i
+  for i in $(seq 1 40); do
+    launchctl print "gui/$(id -u)/$LABEL_ID" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo "fleetd đã chạy: http://127.0.0.1:$PORT  (log: $FLEET_HOME/fleetd.log)"
+}
+
+cmd_uninstall() {
+  launchctl bootout "gui/$(id -u)/$LABEL_ID" 2>/dev/null || true
+  rm -f "$PLIST"; echo "Đã gỡ LaunchAgent (config/token vẫn giữ)."
+}
+
+cmd_restart() { launchctl kickstart -k "gui/$(id -u)/$LABEL_ID" && echo "Đã khởi động lại fleetd."; }
+
+cmd_status() {
+  launchctl print "gui/$(id -u)/$LABEL_ID" 2>/dev/null | grep -E "state =|pid =|last exit" || echo "LaunchAgent chưa cài."
+  local tok; tok="$(token_get || true)"
+  if [[ -n "$tok" ]] && curl -fsS -m 5 -H "Authorization: Bearer $tok" "http://127.0.0.1:$PORT/api/health" ; then echo; fi
+  command -v tailscale >/dev/null && tailscale serve status 2>/dev/null | head -5 || true
+}
+
+cmd_serve() {
+  command -v tailscale >/dev/null || die "chưa cài Tailscale"
+  tailscale serve --bg "$PORT"
+  tailscale serve status
+}
+
+cmd_run() { exec "$VENV/bin/fleetd"; }
+
+cmd_update() {
+  local uv; uv="$(cat "$FLEET_HOME/uv-path" 2>/dev/null || command -v uv || echo "$HOME/.local/bin/uv")"
+  [[ -x "$uv" ]] || die "không tìm thấy uv — chạy ./install.sh"
+  git -C "$REPO" pull --ff-only
+  UV_PROJECT_ENVIRONMENT="$VENV" "$uv" --directory "$REPO" sync --no-dev -q --no-editable --reinstall-package fleet
+  # `git pull` may have rewritten this very script; exec the new copy to regenerate
+  # the LaunchAgent (picks up plist changes) and restart fleetd.
+  exec "$REPO/bin/fleet" install
+}
+cmd_logs() { tail -n "${1:-100}" -f "$FLEET_HOME/fleetd.log"; }
+
+case "${1:-help}" in
+  token|config|peer|install|uninstall|restart|status|serve|run|logs|update) c="$1"; shift; "cmd_$c" "$@";;
+  *) cat <<EOF
+fleet — quản lý fleetd trên máy này
+
+  fleet token init            tạo token mới (máy đầu tiên)
+  fleet token set <token>     dùng token của máy kia
+  fleet token show            in token
+  fleet config [id] [label]   tạo ~/.fleet/config.toml
+  fleet peer add <id> <url> [label]
+  fleet install | uninstall   cài/gỡ LaunchAgent (tự chạy khi đăng nhập)
+  fleet restart | status | logs
+  fleet serve                 mở fleetd cho tailnet qua 'tailscale serve' (HTTPS)
+  fleet update                git pull + cài lại + restart
+  fleet run                   chạy foreground (debug)
+EOF
+  ;;
+esac

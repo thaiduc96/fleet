@@ -1,0 +1,9 @@
+{
+  "name": "fleet-web",
+  "private": true,
+  "description": "Builds fleetd/web/app.js from fleetd/web/src/app.ts. The compiled file is committed so installing fleetd needs no Node.",
+  "scripts": {
+    "build": "npx --yes -p typescript@5.9.3 tsc -p fleetd/web",
+    "check": "npx --yes -p typescript@5.9.3 tsc -p fleetd/web --noEmit"
+  }
+}
