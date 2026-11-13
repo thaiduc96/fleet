@@ -164,3 +164,14 @@ def test_typing_while_a_menu_is_open_is_refused() -> None:
         attacher(tty).type_message("5099ea80", "hi")
 
     assert tty.written == []
+
+
+def test_a_character_split_across_reads_is_decoded_whole() -> None:
+    raw = screen("Chọn màu?", f"{PROMPT_MARK} 1. Đỏ", "  2. Xanh")
+    cut = raw.index("Đ".encode()) + 1
+    tty = FakeTty(raw[:cut])
+    tty.pending.append(raw[cut:])
+
+    view = attacher(tty).screen("5099ea80")
+
+    assert view.prompt is not None and view.prompt.options[0].label == "Đỏ"

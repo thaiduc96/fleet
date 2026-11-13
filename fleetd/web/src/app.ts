@@ -53,6 +53,18 @@ interface ToolCall {
   questions: Question[]; todos: Todo[]; plan: Block[] | null;
 }
 interface Message { id: string | null; role: Role; text: string; ts: string | null; blocks: Block[] | null; tool: ToolCall | null }
+type PromptKind = "plan" | "permission" | "question" | "menu";
+interface PromptOption { key: string; label: string; detail: string | null; needsText: boolean; selected: boolean }
+interface SessionPrompt { kind: PromptKind; title: string; body: string | null; options: PromptOption[] }
+type SessionMode = "default" | "manual" | "auto" | "acceptEdits" | "plan" | "bypassPermissions" | "dontAsk";
+type SettableMode = "manual" | "auto" | "acceptEdits" | "plan";
+/** What the session's terminal shows (fleetd attaches to it). */
+interface SessionScreen { text: string; mode: SessionMode | null; prompt: SessionPrompt | null }
+type SessionInput =
+  | { action: "choose"; option: string; text?: string }
+  | { action: "key"; key: "esc" }
+  | { action: "mode"; mode: SettableMode }
+  | { action: "type"; text: string };
 interface Transcript { version: string; unchanged: boolean; model: string | null; contextTokens: number | null; messages: Message[] }
 interface ActionResult { id: string | null; action: string; output: string }
 
@@ -198,6 +210,27 @@ function parseMessages(v: unknown): Message[] {
     return isRole(o.role) && text !== null
       ? [{ id: str(o.id), role: o.role, text, ts: str(o.ts), blocks, tool: parseTool(o.tool) }] : [];
   });
+}
+
+const PROMPT_KINDS: ReadonlySet<unknown> = new Set(["plan", "permission", "question", "menu"]);
+const isPromptKind = (v: unknown): v is PromptKind => PROMPT_KINDS.has(v);
+const MODES: ReadonlySet<unknown> = new Set(["default", "manual", "auto", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
+const isMode = (v: unknown): v is SessionMode => MODES.has(v);
+
+function parsePrompt(v: unknown): SessionPrompt | null {
+  if (!isObj(v) || !isPromptKind(v.kind)) return null;
+  const options = list(v.options).flatMap((x): PromptOption[] => {
+    const o = obj(x);
+    const key = str(o.key);
+    const label = str(o.label);
+    return key && label ? [{ key, label, detail: str(o.detail), needsText: bool(o.needsText), selected: bool(o.selected) }] : [];
+  });
+  return options.length ? { kind: v.kind, title: str(v.title) ?? "", body: str(v.body), options } : null;
+}
+
+function parseScreen(v: unknown): SessionScreen {
+  const o = obj(v);
+  return { text: str(o.text) ?? "", mode: isMode(o.mode) ? o.mode : null, prompt: parsePrompt(o.prompt) };
 }
 
 function parseTranscript(v: unknown): Transcript {
@@ -652,7 +685,12 @@ function renderCompose(s: Row): void {
   const forceWrap = el("d-force-wrap", HTMLLabelElement);
   const openInTerminal = s.kind === "interactive" && s.pid != null;
   form.hidden = s.stale || !s.sessionId || openInTerminal;
-  forceWrap.hidden = s.state !== "working";
+  forceWrap.hidden = s.state !== "working" || canDrive(s);
+  if (canDrive(s)) {
+    note.textContent = s.state === "working" ? "Gửi thẳng vào session; Claude đọc khi xong bước đang làm." :
+      s.state === "needs_input" ? "Claude đang chờ bạn chọn ở trên." : "Gửi thẳng vào session.";
+    return;
+  }
   note.textContent = s.state === "working" ? "Session đang chạy dở." :
     s.pid != null ? "Session sẽ được dừng rồi tiếp tục với tin nhắn này." :
     "Session sẽ được mở lại ở chế độ nền với tin nhắn này.";
@@ -680,6 +718,7 @@ function renderDrawerHead(): void {
     if (b.dataset.tab === "logs") b.hidden = s.kind !== "background";
   }
   renderCompose(s);
+  renderControl();
 }
 
 function renderInlines(inlines: Inline[]): Node[] {
@@ -775,6 +814,8 @@ interface Live {
   key: string; version: string; timer: number; busy: boolean; loaded: boolean;
   messages: Message[]; nodes: Map<string, { sig: string; node: HTMLElement }>;
   pending: Pending[]; model: string | null; contextTokens: number | null; logs: string | null;
+  screen: SessionScreen | null; screenAt: number; screenBusy: boolean; screenError: string | null;
+  promptCard: { sig: string; node: HTMLElement } | null;
 }
 let live: Live | null = null;
 
@@ -798,7 +839,8 @@ async function loadTab(): Promise<void> {
   if (live?.key !== key) {
     stopLive();
     live = { key, version: "", timer: 0, busy: false, loaded: false, messages: [], nodes: new Map(),
-      pending: [], model: null, contextTokens: null, logs: null };
+      pending: [], model: null, contextTokens: null, logs: null,
+      screen: null, screenAt: 0, screenBusy: false, screenError: null, promptCard: null };
     el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
   } else {
     live.version = "";
@@ -813,8 +855,11 @@ async function pollLive(): Promise<void> {
   if (!document.hidden && !cur.busy) {
     cur.busy = true;
     try {
-      if (drawer.tab === "logs") await pollLogs(cur, drawer.row);
-      else await pollTranscript(cur, drawer.row);
+      const row = drawer.row;
+      if (wantsScreen(cur, row)) void fetchScreen(cur, row);  // slow (attach): never blocks the transcript
+      if (drawer.tab === "logs" && canDrive(row)) renderScreenTab(cur);
+      else if (drawer.tab === "logs") await pollLogs(cur, row);
+      else await pollTranscript(cur, row);
     } catch (e) {
       if (!(e instanceof Unauthorized) && live === cur && !cur.loaded) {
         el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "error" }, `Không tải được: ${String(e)}`));
@@ -901,6 +946,8 @@ function renderConversation(cur: Live, toBottom: boolean): void {
     h("div", { class: "who" }, `${ROLE_LABEL.user} · đã gửi, chờ Claude nhận…`), p.text)));
   const working = workingNode(msgs);
   if (working) nodes.push(working);
+  const card = promptCard(cur);
+  if (card) nodes.push(card);
   if (!nodes.length) nodes.push(h("p", { class: "muted" }, "Chưa có tin nhắn."));
   keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(...nodes), toBottom);
 }
@@ -932,8 +979,10 @@ async function sendMessage(e: Event): Promise<void> {
   if (shownIn) { shownIn.pending.push(bubble); renderConversation(shownIn, true); }
   try {
     const paths = await messageFiles?.upload(s.machine) ?? [];
-    const r = await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`,
-      { text: withPaths(typed, paths), force: force.checked });
+    const message = withPaths(typed, paths);
+    const r = canDrive(s)
+      ? await typeInto(s, message)
+      : await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`, { text: message, force: force.checked });
     text.value = ""; force.checked = false; messageFiles?.clear();
     // A resume can give the job a new short id; keep the drawer on it.
     if (drawer?.row === s && r.id && r.id !== s.id) drawer.row = { ...s, id: r.id };
@@ -950,6 +999,164 @@ async function sendMessage(e: Event): Promise<void> {
     note.textContent = noteText;
     if (submit instanceof HTMLButtonElement) submit.disabled = false;
   }
+}
+
+// ---------------------------------------------------------------- session terminal (answer, mode, esc)
+// fleetd attaches to a running background session and presses keys as a person would,
+// so everything the terminal offers (plan approval, permission prompts, questions,
+// shift+tab modes, esc) works from the web dashboard, Fleet.app and the phone alike.
+const MIN_DRIVE_API = 8;
+const SCREEN_MS = 3000;
+const SETTABLE_MODES: readonly SettableMode[] = ["manual", "auto", "acceptEdits", "plan"];
+const MODE_LABEL: Record<SessionMode, string> = {
+  default: "Mặc định", manual: "Manual: hỏi trước mọi thao tác", auto: "Auto: tự quyết, hỏi khi rủi ro",
+  acceptEdits: "Accept edits: tự sửa file", plan: "Plan: chỉ lập plan", bypassPermissions: "Bypass permissions",
+  dontAsk: "Don't ask",
+};
+const PROMPT_LABEL: Record<PromptKind, string> = {
+  plan: "Claude xin duyệt plan", permission: "Claude xin quyền", question: "Claude hỏi bạn", menu: "Claude đang chờ bạn chọn",
+};
+
+const apiLevelOf = (machine: string): number => fleet?.machines.find((m) => m.machine === machine)?.apiLevel ?? 0;
+
+/** A running background session on a Fleet new enough to attach to it. */
+const canDrive = (s: Row): boolean => s.kind === "background" && s.pid != null && !s.stale && apiLevelOf(s.machine) >= MIN_DRIVE_API;
+
+function wantsScreen(cur: Live, s: Row): boolean {
+  if (!canDrive(s) || cur.screenBusy) return false;
+  if (cur.screenAt === 0) return true;  // once on open: the mode
+  const watching = s.state === "needs_input" || drawer?.tab === "logs";
+  return watching && Date.now() - cur.screenAt >= SCREEN_MS;
+}
+
+const inputPath = (s: Row): string => `${mpath(s.machine)}/${encodeURIComponent(s.id)}/input`;
+
+async function fetchScreen(cur: Live, s: Row): Promise<void> {
+  cur.screenBusy = true;
+  try {
+    const v = parseScreen(await api(`${mpath(s.machine)}/${encodeURIComponent(s.id)}/screen`));
+    if (live !== cur) return;
+    cur.screen = v; cur.screenError = null;
+  } catch (e) {
+    if (live === cur && !(e instanceof Unauthorized)) cur.screenError = e instanceof Error ? e.message : String(e);
+  } finally {
+    cur.screenAt = Date.now();
+    cur.screenBusy = false;
+  }
+  showScreen(cur);
+}
+
+function showScreen(cur: Live): void {
+  if (live !== cur || !drawer) return;
+  renderControl();
+  if (drawer.tab === "logs") renderScreenTab(cur);
+  else if (cur.loaded) renderConversation(cur, false);
+}
+
+function renderScreenTab(cur: Live): void {
+  const text = cur.screen?.text ?? (cur.screenError ? `Không đọc được màn hình: ${cur.screenError}` : "Đang đọc màn hình…");
+  const first = !cur.loaded;
+  cur.loaded = true;
+  keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(h("pre", { class: "logs screen" }, text)), first);
+}
+
+/** Send one input; the reply is the screen afterwards. */
+async function sendInput(s: Row, input: SessionInput, done: string): Promise<boolean> {
+  const cur = live;
+  cur?.promptCard?.node.classList.add("busy");
+  try {
+    const v = parseScreen(await send("POST", inputPath(s), { input }));
+    if (cur && live === cur) { cur.screen = v; cur.screenAt = Date.now(); }
+    toast(done);
+    await refresh();
+    void pollLive();
+    return true;
+  } catch (err) {
+    cur?.promptCard?.node.classList.remove("busy");
+    if (!(err instanceof Unauthorized)) toast(`Không gửi được: ${err instanceof Error ? err.message : String(err)}`, true);
+    return false;
+  } finally {
+    if (cur) showScreen(cur);
+  }
+}
+
+async function typeInto(s: Row, text: string): Promise<ActionResult> {
+  const v = parseScreen(await send("POST", inputPath(s), { input: { action: "type", text } }));
+  if (live) { live.screen = v; live.screenAt = Date.now(); }
+  return { id: s.id, action: "type", output: "" };
+}
+
+/** The menu Claude waits on, as buttons; rebuilt only when the menu itself changes (typed feedback survives polls). */
+function promptCard(cur: Live): HTMLElement | null {
+  const s = drawer?.row;
+  const p = cur.screen?.prompt;
+  if (!s || !p || s.state !== "needs_input" || !canDrive(s)) return null;
+  const sig = JSON.stringify(p);
+  if (cur.promptCard?.sig !== sig) cur.promptCard = { sig, node: buildPromptCard(p, s) };
+  return cur.promptCard.node;
+}
+
+function buildPromptCard(p: SessionPrompt, s: Row): HTMLElement {
+  let chosen: PromptOption | null = null;
+  const feedback = h("textarea", { rows: "3", placeholder: "Nội dung gửi kèm…" });
+  const sendBtn = h("button", { type: "button", class: "primary" }, "Gửi");
+  const textBox = h("div", { class: "prompt-text", hidden: true }, feedback,
+    h("div", { class: "prompt-text-actions" },
+      h("button", { type: "button", onclick: () => { textBox.hidden = true; chosen = null; } }, "Huỷ"), sendBtn));
+  sendBtn.addEventListener("click", () => {
+    const text = feedback.value.trim();
+    if (!chosen || !text) { feedback.focus(); return; }
+    void sendInput(s, { action: "choose", option: chosen.key, text }, `Đã gửi: ${chosen.label}`);
+  });
+  const options = p.options.map((o) => h("button", {
+    type: "button", class: `prompt-option${o.selected ? " selected" : ""}`,
+    onclick: () => {
+      if (o.needsText) {
+        chosen = o; textBox.hidden = false; sendBtn.textContent = `Gửi · ${o.label}`; feedback.focus();
+        return;
+      }
+      void sendInput(s, { action: "choose", option: o.key }, `Đã chọn: ${o.label}`);
+    },
+  }, h("span", { class: "key" }, o.key), h("span", { class: "label" }, o.label),
+  o.detail ? h("span", { class: "detail" }, o.detail) : null));
+  return h("div", { class: `msg prompt ${p.kind}`, role: "group", "aria-label": PROMPT_LABEL[p.kind] },
+    h("div", { class: "who" }, PROMPT_LABEL[p.kind]),
+    p.title ? h("div", { class: "prompt-title" }, p.title) : null,
+    p.body ? h("pre", { class: "prompt-body" }, p.body) : null,
+    h("div", { class: "prompt-options" }, options), textBox);
+}
+
+let controlSig = "";
+
+/** Mode picker and Esc for a running background session. */
+function renderControl(): void {
+  const box = el("d-control", HTMLDivElement);
+  const s = drawer?.row;
+  if (!s || !canDrive(s)) { box.hidden = true; box.replaceChildren(); controlSig = ""; return; }
+  const mode = live?.screen?.mode ?? null;
+  const sig = [s.machine, s.id, s.state, mode, live?.screenError ?? ""].join("|");
+  if (!box.hidden && sig === controlSig) return;  // rebuilding would close an open picker
+  controlSig = sig;
+  const menuOpen = s.state === "needs_input";
+  const sel = h("select", { "aria-label": "Mode của session" },
+    mode === null ? h("option", { value: "", selected: true, disabled: true },
+      menuOpen ? "Trả lời câu hỏi trước" : live?.screenError ? "Không rõ" : "Đang đọc mode…") : null,
+    mode !== null && !SETTABLE_MODES.some((m) => m === mode) ? h("option", { value: mode, selected: true, disabled: true }, MODE_LABEL[mode]) : null,
+    SETTABLE_MODES.map((m) => h("option", { value: m, selected: m === mode }, MODE_LABEL[m])));
+  sel.disabled = menuOpen || mode === null;
+  sel.title = menuOpen ? "Trả lời câu hỏi đang chờ trước, rồi mới đổi mode" : "Như Shift+Tab trong terminal";
+  sel.addEventListener("change", () => {
+    const target = SETTABLE_MODES.find((m) => m === sel.value);
+    if (target) void sendInput(s, { action: "mode", mode: target }, `Đã chuyển sang ${MODE_LABEL[target]}`);
+  });
+  const esc = h("button", {
+    type: "button", title: "Như phím Esc: ngắt Claude đang làm, hoặc đóng câu hỏi đang chờ",
+    onclick: () => { void sendInput(s, { action: "key", key: "esc" }, "Đã gửi Esc"); },
+  }, "⎋ Ngắt (Esc)");
+  esc.disabled = s.state !== "working" && !menuOpen;
+  box.hidden = false;
+  const problem = live?.screenError ? [h("span", { class: "muted" }, "Không đọc được màn hình")] : [];
+  box.replaceChildren(h("label", { class: "mode" }, "Mode", sel), esc, ...problem);
 }
 
 // ---------------------------------------------------------------- new session modal

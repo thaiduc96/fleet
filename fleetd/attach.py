@@ -13,6 +13,7 @@ key sequence; one attach per session at a time.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import logging
 import os
@@ -120,6 +121,7 @@ class Terminal:
         self.short_id = short_id
         self.clock = clock
         self.screen = Screen(COLS, ROWS)
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")  # a read may end mid-character
 
     def settle(self, first_wait: float = QUIET_SEC) -> None:
         """Read until the TUI stops redrawing."""
@@ -129,7 +131,7 @@ class Terminal:
             chunk = self.tty.read(wait)
             if not chunk:
                 return
-            self.screen.feed(chunk.decode("utf-8", "replace"))
+            self.screen.feed(self._decoder.decode(chunk))
             wait = QUIET_SEC
 
     def send(self, keys: str) -> None:

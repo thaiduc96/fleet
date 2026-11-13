@@ -15,6 +15,8 @@ import unicodedata
 CSI_RE = re.compile(r"\x1b\[([?>=!]?)([0-9;:]*)([ -/]*)([@-~])")
 OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 ESC_OTHER_RE = re.compile(r"\x1b([@-Z\\-_]|[()][0-9A-Za-z])")
+# An escape sequence cut off by the end of a read: kept until the next read completes it.
+INCOMPLETE_RE = re.compile(r"\x1b(\[[0-?]*[ -/]*|\][^\x07\x1b]*|[()])?\Z")
 TAB = 8
 Row = list[str | None]  # None: right half of a wide character
 ALT_SCREEN_MODES = ("1049", "47", "1047")
@@ -35,6 +37,7 @@ class Screen:
         self.x = 0
         self.y = 0
         self.saved = (0, 0)
+        self._partial = ""
 
     def _blank(self) -> Row:
         return [" "] * self.cols
@@ -49,6 +52,7 @@ class Screen:
 
     # ------------------------------------------------------------ input
     def feed(self, data: str) -> None:
+        data, self._partial = self._partial + data, ""
         i, n = 0, len(data)
         while i < n:
             ch = data[i]
@@ -131,7 +135,10 @@ class Screen:
             return i + 2
         if m := ESC_OTHER_RE.match(data, i):
             return m.end()
-        return i + 1  # lone or unknown ESC: drop it
+        if INCOMPLETE_RE.match(data, i):
+            self._partial = data[i:]
+            return len(data)
+        return i + 1  # unknown ESC: drop it
 
     def _csi(self, private: str, raw: str, final: str) -> None:
         params = [int(p) if p.isdigit() else 0 for p in raw.replace(":", ";").split(";")] if raw else []

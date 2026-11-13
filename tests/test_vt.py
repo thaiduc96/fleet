@@ -51,3 +51,14 @@ def test_a_real_claude_code_plan_prompt_renders_as_text() -> None:
 
     assert any(f"{PROMPT_MARK} 1. Yes, and use auto mode" in ln for ln in lines)
     assert any("Plan: Đọc số phiên bản Fleet" in ln for ln in lines)
+
+
+@pytest.mark.parametrize("cut", ["a\x1b", "a\x1b[", "a\x1b[2", "a\x1b[23"])
+def test_an_escape_sequence_split_across_reads_still_applies(cut: str) -> None:
+    whole = "a\x1b[23Gb"
+    screen = Screen(30, 2)
+
+    screen.feed(cut)
+    screen.feed(whole[len(cut):])
+
+    assert screen.lines()[0] == "a" + " " * 21 + "b"

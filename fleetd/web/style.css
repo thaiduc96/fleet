@@ -111,6 +111,31 @@ main { padding: 8px 16px 40px; max-width: 1100px; }
 .msg.tool .todos .in_progress { font-weight: 600; }
 .msg.tool .plan { border-left: 3px solid var(--accent); padding-left: 10px; }
 .msg.tool .plan p { margin: 0 0 6px; white-space: pre-wrap; }
+/* Mode + Esc for a running background session (same as shift+tab / esc in the terminal). */
+.control { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 16px;
+  border-bottom: 1px solid var(--line); }
+.control .mode { display: flex; gap: 6px; align-items: center; font-size: 14px; color: var(--muted);
+  min-width: 0; flex: 1 1 0; }
+.control select { flex: 1 1 auto; min-width: 0; max-width: 340px; min-height: 36px; }
+.control button { min-height: 36px; }
+/* The menu Claude waits on, as buttons. */
+.msg.prompt { white-space: normal; border-color: var(--needs); background: var(--needs-bg); }
+.msg.prompt .who { color: var(--needs); font-weight: 600; }
+.msg.prompt.busy { opacity: .6; pointer-events: none; }
+.prompt-title { font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; }
+.prompt-body { margin: 0 0 8px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; font-size: 13px; }
+.prompt-options { display: grid; gap: 6px; }
+.prompt-option { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; text-align: left;
+  padding: 10px 12px; min-height: 44px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--text); font: inherit; overflow-wrap: anywhere; }
+.prompt-option:hover, .prompt-option.selected { border-color: var(--accent); }
+.prompt-option .key { grid-row: span 2; font-weight: 700; color: var(--accent); }
+.prompt-option .detail { grid-column: 2; font-size: 13px; color: var(--muted); }
+.prompt-text { display: grid; gap: 6px; margin-top: 8px; }
+.prompt-text textarea { width: 100%; font: inherit; }
+.prompt-text-actions { display: flex; gap: 8px; justify-content: flex-end; }
+pre.logs.screen { font-size: 12px; line-height: 1.35; white-space: pre; overflow-x: auto; }
 .msg.user.pending { opacity: .65; border-style: dashed; }
 .msg.working { background: transparent; border-style: dashed; color: var(--work); font-size: 14px; display: flex;
   align-items: center; gap: 8px; white-space: normal; overflow-wrap: anywhere; }
