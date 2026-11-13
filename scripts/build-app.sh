@@ -9,15 +9,19 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 VERSION="${1:-$(tr -d '[:space:]' < VERSION)}"
 DIST="$ROOT/dist"
-APP="$DIST/Fleet.app"
+# Assemble and sign outside the repo: under an iCloud-synced ~/Documents, iCloud
+# re-adds xattrs between `xattr -c` and `codesign`, which then fails at random.
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/fleet-build.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+APP="$STAGE/Fleet.app"
 PYVER="3.12"
 
 UV="$(command -v uv || cat "${FLEET_HOME:-$HOME/.fleet}/uv-path" 2>/dev/null || true)"
 [[ -x "$UV" ]] || { echo "uv not found (https://astral.sh/uv)" >&2; exit 1; }
 
 echo "→ Fleet $VERSION"
-rm -rf "$APP" "$DIST/Fleet-"*.zip "$DIST/checksums.txt"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/backend"
+rm -rf "$DIST/Fleet.app" "$DIST/Fleet-"*.zip "$DIST/checksums.txt"
+mkdir -p "$DIST" "$APP/Contents/MacOS" "$APP/Contents/Resources/backend"
 
 echo "→ swift build (release)"
 swift build -c release --package-path app --product Fleet
@@ -68,7 +72,7 @@ EOF
 if [[ -f app/Fleet.icns ]]; then cp app/Fleet.icns "$APP/Contents/Resources/Fleet.icns"; fi
 
 echo "→ codesign (ad-hoc)"
-# Files under an iCloud-synced ~/Documents carry Finder/iCloud xattrs that codesign rejects.
+# Files copied from ~/Documents may still carry Finder/iCloud xattrs that codesign rejects.
 xattr -cr "$APP"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
@@ -83,5 +87,7 @@ codesign --verify --deep --strict "$CHECK/Fleet.app" || { echo "✗ unpacked app
 rm -rf "$CHECK"
 cp scripts/install.sh "$DIST/install.sh"
 (cd "$DIST" && shasum -a 256 "Fleet-$VERSION.zip" install.sh > checksums.txt)
-du -sh "$APP" "$DIST/Fleet-$VERSION.zip" | sed 's#'"$DIST"'/##'
+# A copy for local testing; the signed artifact is the zip.
+ditto --norsrc --noextattr "$APP" "$DIST/Fleet.app"
+du -sh "$APP" "$DIST/Fleet-$VERSION.zip" | sed -e 's#'"$DIST"'/##' -e 's#'"$STAGE"'/##'
 echo "✓ $DIST/Fleet-$VERSION.zip"
