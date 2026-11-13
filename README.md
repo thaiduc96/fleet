@@ -34,12 +34,13 @@ Fleet is a small macOS app for people who run [Claude Code](https://claude.com/c
 - Every Claude Code session on every Mac, grouped by what it needs from you: *needs input → working → failed → done → idle*.
 - A menu bar icon that shows how many sessions are waiting for you, on any machine; click one to jump straight to it.
 - Native macOS notifications when a session needs input, finishes, or fails.
-- The full conversation of any session (prompts, replies, tool calls) and the live terminal of background sessions.
+- The live conversation of any session, updating as Claude works: replies rendered as Markdown (tables, code, lists), every tool call with its command, diff and output, questions, plans and to-do lists, plus the model and context size. Background sessions also show their terminal.
 - Works from an iPhone too: the same dashboard is served over HTTPS inside your tailnet.
 
 **Control from anywhere**
 - Start a new background session on any Mac, in any trusted project folder.
 - Reply to a session: Fleet resumes it with your message under the same session id, wherever it runs.
+- Attach files (pick, paste or drag and drop) to a reply or a new session; they are saved on the machine that runs the session and Claude reads them from there.
 - Stop, restart, or remove sessions.
 
 **Built for several machines**
@@ -109,7 +110,8 @@ The icon shows the number of sessions waiting for you. The menu lists sessions t
 
 ### Dashboard
 - **Sessions** are grouped by state and labelled with their machine. Enable **Lịch sử** (*History*) to also see sessions closed in the last three days.
-- **Session details** show the conversation and, for background sessions, the terminal. Buttons copy the `claude attach` and `claude --resume` commands.
+- **Session details** show the conversation and, for background sessions, the terminal. Both follow the session live: every 1.5 s while Claude works, every 4 s otherwise. A message you send appears at once, and a line shows which tool Claude is running. Tap a tool call to see its input and output. Buttons copy the `claude attach` and `claude --resume` commands.
+- **Attachments** (📎, paste, or drag and drop; up to 25 MB each) are uploaded to the machine that runs the session, saved under `~/.fleet/uploads/`, and their paths are added to your message, the same way Claude Code handles pasted images.
 - **＋ Session** starts `claude --bg` on the chosen machine. The folder must be inside your home directory and trusted by Claude Code. Remote sessions may use the `manual`, `auto`, `acceptEdits` or `plan` permission modes; modes that skip permission prompts are deliberately not offered.
 - **Replying** to a session continues the same session:
 
@@ -165,6 +167,7 @@ The app is then swapped in atomically, the previous version is kept until the ne
 | `~/.fleet/config.toml` | Machine id, label, port |
 | `~/.fleet/state.json` | Settings changed at runtime: known machines, keep-awake mode, label, own URL |
 | `~/.fleet/cache/` | Last known snapshot of each other machine |
+| `~/.fleet/uploads/` | Files attached from the dashboard (deleted after 30 days) |
 | `~/.fleet/fleetd.log` | fleetd log |
 | Keychain item `fleet.token` | The shared fleet token |
 | `~/Library/LaunchAgents/com.fleet.app.plist` | Starts Fleet at login, and restarts it if it crashes |
@@ -213,7 +216,8 @@ All endpoints require the fleet token, except `/api/hello` and the dashboard its
 | `GET /api/hello` | Identity of this fleetd (no secrets) |
 | `GET /api/fleet` | Snapshot of every machine |
 | `GET /api/local` · `GET /api/health` | This machine's snapshot · health and keep-awake state |
-| `GET /api/sessions/<id>/transcript` · `/logs` | Conversation · terminal output |
+| `GET /api/sessions/<id>/transcript[?since=<version>]` · `/logs` | Conversation (`unchanged: true` when nothing changed since `version`) · terminal output |
+| `POST /api/uploads?name=<file name>` | Save an attachment (raw body, max 25 MB); returns its path |
 | `POST /api/sessions` | Start a background session |
 | `POST /api/sessions/<id>/message` · `/stop` · `/respawn` · `DELETE /api/sessions/<id>` | Reply · stop · restart · remove |
 | `POST /api/awake` | Keep-awake mode: `off`, `ac`, `always` |
