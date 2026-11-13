@@ -263,8 +263,11 @@ class PeerClient:
             raise PeerGoneError(machine)
         return peer
 
-    async def get(self, machine: str, path: str) -> httpx.Response:
-        return await self.client.get(f"{self._peer(machine).url}{path}")
+    async def get(self, machine: str, path: str, timeout: float | None = None) -> httpx.Response:
+        """Read from a peer; `timeout` overrides the client's short default (attach reads are slow)."""
+        if timeout is None:
+            return await self.client.get(f"{self._peer(machine).url}{path}")
+        return await self.client.get(f"{self._peer(machine).url}{path}", timeout=timeout)
 
     async def request(self, machine: str, method: str, path: str,
                       json_body: dict[str, object] | None = None) -> httpx.Response:

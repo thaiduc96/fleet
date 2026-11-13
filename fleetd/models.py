@@ -360,6 +360,62 @@ class MessageBody(ApiModel):
     force: bool = False  # stop a session that is still working
 
 
+PromptKind = Literal["plan", "permission", "question", "menu"]
+SessionMode = Literal["default", "manual", "auto", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]
+SettableMode = Literal["manual", "auto", "acceptEdits", "plan"]  # remote callers may not skip prompts
+
+
+class PromptOption(ApiModel):
+    key: str                    # the digit to press
+    label: str
+    detail: str | None = None   # the grey line under a choice
+    needs_text: bool = False    # "Tell Claude what to change", "Type something."
+    selected: bool = False
+
+
+class Prompt(ApiModel):
+    """A menu a background session waits on, read off its terminal screen."""
+
+    kind: PromptKind
+    title: str
+    body: str | None = None
+    options: list[PromptOption]
+
+
+class SessionScreen(ApiModel):
+    """What `claude attach` shows right now."""
+
+    id: str
+    text: str
+    mode: SessionMode | None = None  # None: not visible (a menu covers the footer)
+    prompt: Prompt | None = None
+
+
+class ChooseInput(ApiModel):
+    action: Literal["choose"]
+    option: str = Field(pattern=r"^[1-9]$")
+    text: str | None = Field(default=None, max_length=4000)
+
+
+class KeyInput(ApiModel):
+    action: Literal["key"]
+    key: Literal["esc"]
+
+
+class ModeInput(ApiModel):
+    action: Literal["mode"]
+    mode: SettableMode
+
+
+class TypeInput(ApiModel):
+    action: Literal["type"]
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class SessionInputBody(ApiModel):
+    input: ChooseInput | KeyInput | ModeInput | TypeInput = Field(discriminator="action")
+
+
 class Upload(ApiModel):
     """A file attached from the dashboard, saved on the machine that runs the session."""
 

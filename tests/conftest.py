@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fleetd import config
+from fleetd.attach import Attacher
 from fleetd.claude_cli import ClaudeCLI, CLIError
 from fleetd.main import create_app
 from fleetd.models import Awake, Battery, Health
@@ -230,7 +231,7 @@ def make_client(claude_home: Path, tmp_path: Path, user_home: Path) -> Iterator[
     def build(peers: tuple[config.Peer, ...] = (), peer_handler: Handler = unreachable,
               fake: FakeClaude | None = None, procs: FakeProcs | None = None,
               keep_awake: str = "off", git: Callable[..., str | None] = no_git,
-              app_version: str | None = None,
+              app_version: str | None = None, attacher: Attacher | None = None,
               **fake_kw: object) -> TestClient:
         cfg = config.Config(machine="home", label="🏠 Nhà", claude_home=claude_home,
                             peers=peers, home=tmp_path / "fleet", user_home=user_home,
@@ -239,7 +240,8 @@ def make_client(claude_home: Path, tmp_path: Path, user_home: Path) -> Iterator[
         app = create_app(cfg, token=TOKEN, cli=fake or FakeClaude(claude_home, **fake_kw),
                          peer_http=httpx.AsyncClient(transport=httpx.MockTransport(peer_handler)),
                          clock=clock, sleep=clock.sleep, spawn=procs or FakeProcs(),
-                         health_fn=fake_health, git=git, app_version=app_version)
+                         health_fn=fake_health, git=git, app_version=app_version,
+                         attacher=attacher)
         client = TestClient(app)
         client.__enter__()
         clients.append(client)

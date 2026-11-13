@@ -28,6 +28,7 @@ from starlette.types import Scope
 
 from fleetd import API_LEVEL, auth, config, snapshot, system
 from fleetd.actions import ActionError, Actions, check_id
+from fleetd.attach import Attacher, AttachError
 from fleetd.awake import KeepAwake, Spawn, spawn_process
 from fleetd.claude_cli import ID_RE, ClaudeCLI, CLIError
 from fleetd.handoff import Git, Handoff, run_git
@@ -55,6 +56,8 @@ from fleetd.models import (
     ReleaseBody,
     ReleaseResult,
     Roster,
+    SessionInputBody,
+    SessionScreen,
     SettingsBody,
     Transcript,
     UpdateResult,
@@ -78,6 +81,7 @@ UploadName = Annotated[str, Query(min_length=1, max_length=255)]
 WEB_DIR = Path(__file__).resolve().parent / "web"
 VERSIONED_ASSETS = ("app.js", "style.css")
 NO_CACHE = {"Cache-Control": "no-cache"}
+SCREEN_TIMEOUT = 30.0  # a peer attaches to the session and waits for the TUI to settle
 
 
 def versioned_index(web_dir: Path) -> str:
@@ -127,7 +131,8 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
                health_fn: Callable[[Awake | None, int | None], Health] = system.health,
                git: Git = run_git,
                app_version: str | None = None,
-               wall_clock: Callable[[], float] = time.time) -> FastAPI:
+               wall_clock: Callable[[], float] = time.time,
+               attacher: Attacher | None = None) -> FastAPI:
     cfg = cfg or _config_from_env()
     token = token or auth.load_token(cfg.token)
     # Set by Fleet.app when it launches fleetd; absent for the old LaunchAgent install.
@@ -135,6 +140,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     cli = cli or ClaudeCLI(cfg.claude_bin, cfg.claude_home)
     idx = TranscriptIndex(cfg.claude_home)
     actions = Actions(cli, idx, cfg.user_home, clock=clock, sleep=sleep)
+    attacher = attacher or Attacher.for_cli(cfg.claude_bin)
     handoff = Handoff(cfg.claude_home, idx, cfg.user_home, cfg.machine, git=git)
     try:
         default_mode = AwakeMode(cfg.keep_awake)
@@ -196,8 +202,12 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     async def action_error(_: Request, e: ActionError) -> JSONResponse:
         return JSONResponse({"detail": e.message}, status_code=e.status)
 
+    @app.exception_handler(AttachError)
+    async def attach_error(_: Request, e: AttachError) -> JSONResponse:
+        return JSONResponse({"detail": e.message}, status_code=e.status)
+
     async def on_machine(machine: str, method: str, path: str,
-                         local: Callable[[], ActionResult], body: BaseModel | None = None) -> Response:
+                         local: Callable[[], BaseModel], body: BaseModel | None = None) -> Response:
         """Run an action here, or forward it to the peer that owns the session."""
         if machine == cfg.machine:
             result = await asyncio.to_thread(local)
@@ -357,11 +367,14 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     async def per_machine(machine: str, ident: str, what: str, limit: int = 60,
                           since: str | None = None) -> Response:
         """Read-only proxy so the dashboard talks to one origin only."""
-        if what not in ("transcript", "logs") or not ID_RE.fullmatch(ident):
+        if what not in ("transcript", "logs", "screen") or not ID_RE.fullmatch(ident):
             raise HTTPException(404)
         if machine == cfg.machine:
+            body: BaseModel
             if what == "transcript":
                 body = await asyncio.to_thread(read_transcript, ident, limit, since)
+            elif what == "screen":
+                body = await asyncio.to_thread(read_screen, ident)
             else:
                 body = await asyncio.to_thread(read_logs, ident)
             return Response(body.model_dump_json(), media_type="application/json")
@@ -370,7 +383,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         query = urlencode({"limit": limit, **({"since": since} if since else {})})
         path = f"/api/sessions/{ident}/{what}" + (f"?{query}" if what == "transcript" else "")
         try:
-            r = await peers().get(machine, path)
+            r = await peers().get(machine, path, timeout=SCREEN_TIMEOUT if what == "screen" else None)
         except httpx.HTTPError as e:
             raise HTTPException(504, f"{machine} unreachable: {e}") from e
         return relay(machine, r)
@@ -391,6 +404,30 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     @app.post("/api/sessions/{ident}/message", dependencies=[Depends(require_write)])
     def message_session(ident: str, body: MessageBody) -> ActionResult:
         return actions.message(ident, body)
+
+    # ---- the session's own terminal (answer menus, mode, esc, typing) -----
+    def read_screen(ident: str) -> SessionScreen:
+        return attacher.screen(actions.live_background(ident))
+
+    def send_input(ident: str, body: SessionInputBody) -> SessionScreen:
+        short_id = actions.live_background(ident)
+        match body.input.action:
+            case "choose":
+                return attacher.choose(short_id, body.input.option, body.input.text)
+            case "key":
+                return attacher.interrupt(short_id)
+            case "mode":
+                return attacher.set_mode(short_id, body.input.mode)
+            case "type":
+                return attacher.type_message(short_id, body.input.text)
+
+    @app.get("/api/sessions/{ident}/screen", dependencies=[Depends(require)])
+    def session_screen(ident: str) -> SessionScreen:
+        return read_screen(ident)
+
+    @app.post("/api/sessions/{ident}/input", dependencies=[Depends(require_write)])
+    def session_input(ident: str, body: SessionInputBody) -> SessionScreen:
+        return send_input(ident, body)
 
     @app.delete("/api/sessions/{ident}", dependencies=[Depends(require_write)])
     def remove_session(ident: str) -> ActionResult:
@@ -494,6 +531,12 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         check_id(ident)
         return await on_machine(machine, "POST", f"/api/sessions/{ident}/message",
                                 lambda: actions.message(ident, body), body)
+
+    @app.post("/api/m/{machine}/sessions/{ident}/input", dependencies=[Depends(require_write)])
+    async def m_input(machine: str, ident: str, body: SessionInputBody) -> Response:
+        check_id(ident)
+        return await on_machine(machine, "POST", f"/api/sessions/{ident}/input",
+                                lambda: send_input(ident, body), body)
 
     @app.post("/api/m/{machine}/sessions/{ident}/{action}", dependencies=[Depends(require_write)])
     async def m_action(machine: str, ident: str, action: str) -> Response:
