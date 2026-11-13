@@ -7,6 +7,7 @@ Listens on 127.0.0.1 only. Expose it to your tailnet with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import threading
@@ -20,9 +21,10 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.types import Scope
 
 from fleetd import API_LEVEL, auth, config, snapshot, system
 from fleetd.actions import ActionError, Actions, check_id
@@ -74,6 +76,32 @@ from fleetd.uploads import MAX_UPLOAD_BYTES, Uploads
 M = TypeVar("M", bound=BaseModel)
 UploadName = Annotated[str, Query(min_length=1, max_length=255)]
 WEB_DIR = Path(__file__).resolve().parent / "web"
+VERSIONED_ASSETS = ("app.js", "style.css")
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+def versioned_index(web_dir: Path) -> str:
+    """index.html with ?v=<content hash> on its script and stylesheet.
+
+    After an update the URL changes, so a browser can never pair the new page
+    with an app.js it cached heuristically before (1.1.0: the 📎 button showed
+    up, but the old script behind it did nothing).
+    """
+    html = (web_dir / "index.html").read_text(encoding="utf-8")
+    for name in VERSIONED_ASSETS:
+        digest = hashlib.sha256((web_dir / name).read_bytes()).hexdigest()[:8]
+        html = html.replace(f'/static/{name}"', f'/static/{name}?v={digest}"')
+    return html
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files that browsers must revalidate (cheap 304 via ETag) before reuse."""
+
+    def file_response(self, full_path: str | os.PathLike[str], stat_result: os.stat_result,
+                      scope: Scope, status_code: int = 200) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers.update(NO_CACHE)
+        return response
 log = logging.getLogger("fleetd")
 
 
@@ -516,11 +544,13 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return relay(machine, r)
 
     # ---- dashboard -------------------------------------------------------
-    @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    index_html = versioned_index(WEB_DIR)  # assets do not change while fleetd runs
 
-    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    @app.get("/")
+    def index() -> HTMLResponse:
+        return HTMLResponse(index_html, headers=NO_CACHE)
+
+    app.mount("/static", RevalidatedStaticFiles(directory=WEB_DIR), name="static")
     return app
 
 
