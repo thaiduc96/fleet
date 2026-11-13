@@ -30,7 +30,30 @@ interface Machine {
   apiLevel: number; isSelf: boolean; appVersion: string | null;
 }
 interface Fleet { machines: Machine[] }
-interface Message { role: Role; text: string; ts: string | null }
+/** Markdown parsed by fleetd (fleetd/markdown.py); rendered with DOM nodes, never innerHTML. */
+type Inline =
+  | { type: "text" | "code"; text: string }
+  | { type: "strong" | "em"; children: Inline[] }
+  | { type: "link"; href: string; children: Inline[] };
+type Align = "left" | "center" | "right" | null;
+type Block =
+  | { type: "heading"; level: number; inlines: Inline[] }
+  | { type: "paragraph"; inlines: Inline[] }
+  | { type: "code"; lang: string | null; text: string }
+  | { type: "list"; ordered: boolean; start: number | null; items: Block[][] }
+  | { type: "quote"; children: Block[] }
+  | { type: "table"; align: Align[]; header: Inline[][]; rows: Inline[][][] }
+  | { type: "rule" };
+interface Question { question: string; header: string | null; options: string[] }
+type TodoStatus = "pending" | "in_progress" | "completed";
+interface Todo { content: string; status: TodoStatus }
+/** A tool call as Claude Code's terminal shows it; result is null while the tool still runs. */
+interface ToolCall {
+  name: string; detail: string | null; result: string | null; isError: boolean;
+  questions: Question[]; todos: Todo[]; plan: Block[] | null;
+}
+interface Message { id: string | null; role: Role; text: string; ts: string | null; blocks: Block[] | null; tool: ToolCall | null }
+interface Transcript { version: string; unchanged: boolean; model: string | null; contextTokens: number | null; messages: Message[] }
 interface ActionResult { id: string | null; action: string; output: string }
 
 /** A session as shown in the list: plus which machine it belongs to. */
@@ -106,12 +129,81 @@ function parseMachine(v: unknown): Machine {
 
 const parseFleet = (v: unknown): Fleet => ({ machines: list(obj(v).machines).map(parseMachine) });
 
+const SAFE_HREF = /^(https?:|mailto:)/i;
+
+function parseInlines(v: unknown): Inline[] {
+  return list(v).flatMap((x): Inline[] => {
+    const o = obj(x);
+    const text = str(o.text) ?? "";
+    switch (o.type) {
+      case "text": case "code": return [{ type: o.type, text }];
+      case "strong": case "em": return [{ type: o.type, children: parseInlines(o.children) }];
+      case "link": {
+        const href = str(o.href);
+        const children = parseInlines(o.children);
+        // fleetd already drops unsafe schemes; an old or odd peer must not get past here either.
+        return href && SAFE_HREF.test(href) ? [{ type: "link", href, children }] : children;
+      }
+      default: return text ? [{ type: "text", text }] : [];
+    }
+  });
+}
+
+const parseAlign = (v: unknown): Align => (v === "left" || v === "center" || v === "right" ? v : null);
+
+function parseBlocks(v: unknown): Block[] {
+  return list(v).flatMap((x): Block[] => {
+    const o = obj(x);
+    switch (o.type) {
+      case "heading": return [{ type: "heading", level: Math.min(6, Math.max(1, num(o.level) ?? 3)), inlines: parseInlines(o.inlines) }];
+      case "paragraph": return [{ type: "paragraph", inlines: parseInlines(o.inlines) }];
+      case "code": return [{ type: "code", lang: str(o.lang), text: str(o.text) ?? "" }];
+      case "list": return [{ type: "list", ordered: bool(o.ordered), start: num(o.start), items: list(o.items).map(parseBlocks) }];
+      case "quote": return [{ type: "quote", children: parseBlocks(o.children) }];
+      case "table": return [{
+        type: "table", align: list(o.align).map(parseAlign), header: list(o.header).map(parseInlines),
+        rows: list(o.rows).map((r) => list(r).map(parseInlines)),
+      }];
+      case "rule": return [{ type: "rule" }];
+      default: return [];
+    }
+  });
+}
+
+const parseTodoStatus = (v: unknown): TodoStatus => (v === "in_progress" || v === "completed" ? v : "pending");
+
+function parseTool(v: unknown): ToolCall | null {
+  if (!isObj(v)) return null;
+  return {
+    name: str(v.name) ?? "tool", detail: str(v.detail), result: str(v.result), isError: bool(v.isError),
+    questions: list(v.questions).flatMap((q) => {
+      const o = obj(q);
+      const question = str(o.question);
+      return question ? [{ question, header: str(o.header), options: list(o.options).flatMap((x) => str(x) ?? []) }] : [];
+    }),
+    todos: list(v.todos).flatMap((t) => {
+      const o = obj(t);
+      const content = str(o.content);
+      return content ? [{ content, status: parseTodoStatus(o.status) }] : [];
+    }),
+    plan: Array.isArray(v.plan) ? parseBlocks(v.plan) : null,
+  };
+}
+
 function parseMessages(v: unknown): Message[] {
   return list(obj(v).messages).flatMap((m) => {
     const o = obj(m);
     const text = str(o.text);
-    return isRole(o.role) && text !== null ? [{ role: o.role, text, ts: str(o.ts) }] : [];
+    const blocks = Array.isArray(o.blocks) ? parseBlocks(o.blocks) : null;
+    return isRole(o.role) && text !== null
+      ? [{ id: str(o.id), role: o.role, text, ts: str(o.ts), blocks, tool: parseTool(o.tool) }] : [];
   });
+}
+
+function parseTranscript(v: unknown): Transcript {
+  const o = obj(v);
+  return { version: str(o.version) ?? "", unchanged: bool(o.unchanged), model: str(o.model),
+    contextTokens: num(o.contextTokens), messages: parseMessages(v) };
 }
 
 function parseAction(v: unknown): ActionResult {
@@ -204,6 +296,95 @@ async function write(method: "POST" | "DELETE", path: string, body?: Obj): Promi
 }
 
 const mpath = (machine: string): string => `/api/m/${encodeURIComponent(machine)}/sessions`;
+
+// ---------------------------------------------------------------- attachments
+// Like Claude Code's own pasted images: the file is saved on the machine that runs the
+// session and its path goes into the message, so Claude reads it with its Read tool.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;  // fleetd/uploads.py MAX_UPLOAD_BYTES
+
+class Attachments {
+  private files: File[] = [];
+
+  constructor(private readonly chips: HTMLDivElement, private readonly picker: HTMLInputElement,
+              private readonly busyNote: HTMLSpanElement) {}
+
+  add(files: Iterable<File>): void {
+    for (const f of files) {
+      if (f.size > MAX_UPLOAD_BYTES) { toast(`"${f.name}" quá lớn (${size(f.size)}, tối đa ${size(MAX_UPLOAD_BYTES)}).`, true); continue; }
+      this.files.push(f);
+    }
+    this.render();
+  }
+
+  clear(): void { this.files = []; this.picker.value = ""; this.render(); }
+
+  /** Upload every file to `machine`; returns their saved paths, or throws naming the file that failed. */
+  async upload(machine: string): Promise<string[]> {
+    const paths: string[] = [];
+    for (const [k, f] of this.files.entries()) {
+      this.busyNote.textContent = `Đang tải lên ${k + 1}/${this.files.length}: ${f.name}…`;
+      try {
+        const saved = obj(await api(`/api/m/${encodeURIComponent(machine)}/uploads?name=${encodeURIComponent(f.name || "file")}`, {
+          method: "POST", headers: { [WRITE_HEADER]: "1", "Content-Type": "application/octet-stream" }, body: f,
+        }));
+        const path = str(saved.path);
+        if (!path) throw new Error("máy đích không trả về đường dẫn");
+        paths.push(path);
+      } catch (err) {
+        if (err instanceof Unauthorized) throw err;
+        throw new Error(`tải "${f.name}" lên thất bại: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return paths;
+  }
+
+  private render(): void {
+    this.chips.hidden = !this.files.length;
+    this.chips.replaceChildren(...this.files.map((f, k) => h("span", { class: "chip" },
+      h("span", { class: "chip-name", title: f.name }, f.name || "file"), h("span", { class: "muted" }, size(f.size)),
+      h("button", { type: "button", class: "ghost", "aria-label": `Bỏ ${f.name}`, onclick: () => {
+        this.files.splice(k, 1); this.render();
+      } }, "✕"))));
+  }
+}
+
+function size(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** The message as Claude Code's CLI would send it: text, then one attached path per line. */
+const withPaths = (text: string, paths: string[]): string => (paths.length ? `${text}\n\n${paths.join("\n")}` : text);
+
+/** 📎 button, paste and drag-and-drop for one form. */
+function wireAttachments(prefix: "d" | "n", target: HTMLElement, text: HTMLTextAreaElement, noteId: string): Attachments {
+  const picker = el(`${prefix}-file`, HTMLInputElement);
+  const files = new Attachments(el(`${prefix}-files`, HTMLDivElement), picker, el(noteId, HTMLSpanElement));
+  el(`${prefix}-attach`, HTMLButtonElement).addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => { files.add(picker.files ?? []); picker.value = ""; });
+  text.addEventListener("paste", (e) => {
+    const pasted = e.clipboardData?.files;
+    if (!pasted?.length) return;
+    files.add(pasted);
+    // A copied image also carries text (its name/URL): keep only the file.
+    e.preventDefault();
+  });
+  target.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault(); target.classList.add("dropping");
+  });
+  target.addEventListener("dragleave", () => target.classList.remove("dropping"));
+  target.addEventListener("drop", (e) => {
+    target.classList.remove("dropping");
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault(); files.add(e.dataTransfer.files);
+  });
+  return files;
+}
+
+let messageFiles: Attachments | null = null;
+let sessionFiles: Attachments | null = null;
 
 // ---------------------------------------------------------------- state
 let fleet: Fleet | null = null;
@@ -414,8 +595,14 @@ function render(): void {
   el("groups", HTMLElement).replaceChildren(...(sections.length ? sections : [h("p", { class: "empty" }, "Không có session nào.")]));
   if (drawer) {
     const cur = drawer;
-    const fresh = all.find((s) => s.machine === cur.row.machine && s.id === cur.row.id);
-    if (fresh) { cur.row = fresh; renderDrawerHead(); }
+    const fresh = all.find((s) => s.machine === cur.row.machine && s.id === cur.row.id)
+      ?? all.find((s) => s.machine === cur.row.machine && cur.row.sessionId != null && s.sessionId === cur.row.sessionId);
+    if (fresh) {
+      const stateChanged = fresh.state !== cur.row.state;
+      cur.row = fresh;
+      renderDrawerHead();
+      if (stateChanged && live?.loaded && cur.tab === "transcript") renderConversation(live, false);  // the "working" line
+    }
   }
 }
 
@@ -476,7 +663,10 @@ function renderDrawerHead(): void {
   const s = drawer.row;
   el("d-title", HTMLHeadingElement).textContent = s.name ?? s.id;
   el("d-meta", HTMLDivElement).textContent = [s.mlabel, STATE_LABEL[s.state], shortPath(s.cwd),
-    s.costUSD != null ? `$${s.costUSD.toFixed(2)}` : null, ago(s.updatedAt ?? s.startedAt)]
+    s.costUSD != null ? `$${s.costUSD.toFixed(2)}` : null,
+    live?.model ? live.model.replace(/^claude-/, "") : null,
+    live?.contextTokens ? `${Math.round(live.contextTokens / 1000)}k token context` : null,
+    ago(s.updatedAt ?? s.startedAt)]
     .filter(Boolean).join(" · ");
   const acts: Node[] = [...actionButtons(s)];
   if (s.kind === "background") acts.push(copyBtn("Copy attach", `claude attach ${s.id}`));
@@ -492,47 +682,237 @@ function renderDrawerHead(): void {
   renderCompose(s);
 }
 
-function messageNode(m: Message): HTMLDivElement {
-  if (m.role === "tool") return h("div", { class: "msg tool" }, `→ ${m.text}`);
-  return h("div", { class: `msg ${m.role}` }, h("div", { class: "who" }, `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`), m.text);
+function renderInlines(inlines: Inline[]): Node[] {
+  return inlines.map((i): Node => {
+    switch (i.type) {
+      case "text": return document.createTextNode(i.text);
+      case "code": return h("code", {}, i.text);
+      case "strong": return h("strong", {}, renderInlines(i.children));
+      case "em": return h("em", {}, renderInlines(i.children));
+      case "link": return h("a", { href: i.href, target: "_blank", rel: "noopener noreferrer" }, renderInlines(i.children));
+    }
+  });
 }
 
-async function loadTab(): Promise<void> {
-  if (!drawer) return;
-  const { row: s, tab } = drawer;
-  const body = el("d-body", HTMLDivElement);
-  body.replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
-  try {
-    switch (tab) {
-      case "logs": {
-        const d = obj(await api(`${mpath(s.machine)}/${encodeURIComponent(s.id)}/logs`));
-        body.replaceChildren(h("pre", { class: "logs" }, str(d.logs) || "(trống)"));
-        break;
-      }
-      case "transcript": {
-        if (!s.sessionId) { body.replaceChildren(h("p", { class: "muted" }, "Không có transcript.")); return; }
-        const msgs = parseMessages(await api(`${mpath(s.machine)}/${encodeURIComponent(s.sessionId)}/transcript?limit=120`));
-        body.replaceChildren(...(msgs.length ? msgs.map(messageNode) : [h("p", { class: "muted" }, "Chưa có tin nhắn.")]));
-        break;
-      }
-      default: {
-        const never: never = tab;
-        throw new Error(`unknown tab ${String(never)}`);
-      }
+const HEADING_TAGS = ["h3", "h3", "h4", "h5", "h6", "h6"] as const;  // h1/h2 belong to the page
+
+function cell(tag: "th" | "td", inlines: Inline[], align: Align | undefined): HTMLTableCellElement {
+  return h(tag, { style: align ? `text-align:${align}` : null }, renderInlines(inlines));
+}
+
+function renderBlock(b: Block): Node {
+  switch (b.type) {
+    case "heading": return h(HEADING_TAGS[b.level - 1] ?? "h6", { class: "md-h" }, renderInlines(b.inlines));
+    case "paragraph": return h("p", {}, renderInlines(b.inlines));
+    case "code": return h("pre", { class: "md-code", "data-lang": b.lang }, h("code", {}, b.text));
+    case "list": {
+      const items = b.items.map((item) => h("li", {}, renderBlocks(item)));
+      return b.ordered ? h("ol", { start: b.start != null && b.start !== 1 ? String(b.start) : null }, items) : h("ul", {}, items);
     }
-    body.scrollTop = body.scrollHeight;
-  } catch (e) {
-    if (!(e instanceof Unauthorized)) body.replaceChildren(h("p", { class: "error" }, `Không tải được: ${String(e)}`));
+    case "quote": return h("blockquote", {}, renderBlocks(b.children));
+    case "table": return h("div", { class: "md-table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, b.header.map((c, k) => cell("th", c, b.align[k])))),
+      h("tbody", {}, b.rows.map((r) => h("tr", {}, r.map((c, k) => cell("td", c, b.align[k])))))));
+    case "rule": return h("hr");
   }
 }
 
+function renderBlocks(blocks: Block[]): Node[] {
+  return blocks.map(renderBlock);
+}
+
+const TODO_MARK: Record<TodoStatus, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
+const DIFF_TOOLS: ReadonlySet<string> = new Set(["Edit", "MultiEdit"]);
+
+/** Edit diffs: "- " lines red, "+ " lines green, like the terminal. */
+function detailNode(t: ToolCall): HTMLPreElement | null {
+  if (!t.detail) return null;
+  if (!DIFF_TOOLS.has(t.name)) return h("pre", { class: "tool-detail" }, t.detail);
+  return h("pre", { class: "tool-detail" }, t.detail.split("\n").map((line) => h("span", {
+    class: line.startsWith("+ ") ? "add" : line.startsWith("- ") ? "del" : null,
+  }, `${line}\n`)));
+}
+
+function toolNode(m: Message): HTMLDivElement {
+  const t = m.tool;
+  if (!t) return h("div", { class: "msg tool" }, `→ ${m.text}`);
+  const mark = t.result === null ? " …" : t.isError ? " ✗" : "";
+  const always: Node[] = [];
+  if (t.questions.length) {
+    always.push(h("div", { class: "tool-questions" }, t.questions.map((q) => h("div", {},
+      h("strong", {}, q.question), q.options.length ? h("ul", {}, q.options.map((o) => h("li", {}, o))) : null))));
+  }
+  if (t.todos.length) always.push(h("ul", { class: "todos" }, t.todos.map((td) => h("li", { class: td.status }, `${TODO_MARK[td.status]} ${td.content}`))));
+  if (t.plan?.length) always.push(h("div", { class: "plan md" }, renderBlocks(t.plan)));
+  const output = t.result === null ? h("p", { class: "muted" }, "đang chạy…")
+    : h("pre", { class: `tool-result${t.isError ? " error" : ""}` }, t.result || "(không có output)");
+  return h("div", { class: `msg tool${t.isError ? " error" : ""}` },
+    h("details", {}, h("summary", {}, `→ ${m.text}${mark}`), detailNode(t), output), always);
+}
+
+function messageNode(m: Message): HTMLDivElement {
+  if (m.role === "tool") return toolNode(m);
+  const who = h("div", { class: "who" }, `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`);
+  // Old fleetd peers send no blocks: keep their plain text.
+  if (m.blocks && m.blocks.length) return h("div", { class: `msg ${m.role} md` }, who, renderBlocks(m.blocks));
+  return h("div", { class: `msg ${m.role}` }, who, m.text);
+}
+
+// ---------------------------------------------------------------- live drawer
+// The open tab polls its machine: fast while Claude works or a sent message has not
+// shown up yet, slower otherwise. Transcript polls send ?since=<version>, so an
+// unchanged transcript costs fleetd one stat. Only changed messages are rebuilt,
+// so open tool details and the scroll position survive.
+const LIVE_FAST_MS = 1500;
+const LIVE_SLOW_MS = 4000;
+const PENDING_TTL_MS = 3 * 60 * 1000;
+const TRANSCRIPT_LIMIT = 200;
+const NEAR_BOTTOM_PX = 80;
+
+/** A message sent from here that the transcript does not show yet; `after` = last message id at send. */
+interface Pending { text: string; at: number; after: string | null }
+interface Live {
+  key: string; version: string; timer: number; busy: boolean; loaded: boolean;
+  messages: Message[]; nodes: Map<string, { sig: string; node: HTMLElement }>;
+  pending: Pending[]; model: string | null; contextTokens: number | null; logs: string | null;
+}
+let live: Live | null = null;
+
+const liveKey = (s: Row, tab: Tab): string => `${s.machine}/${s.sessionId ?? s.id}/${tab}`;
+const sameText = (a: string, b: string): boolean => a.trim().startsWith(b.trim().slice(0, 200));
+/** Has `p` shown up? Only messages newer than the send count, so a repeated "ok" is not mistaken for it. */
+function arrived(msgs: Message[], p: Pending): boolean {
+  const from = p.after ? msgs.findIndex((m) => m.id === p.after) : -1;  // -1: scrolled out, all are newer
+  return msgs.slice(from + 1).some((m) => m.role === "user" && sameText(m.text, p.text));
+}
+
+function stopLive(): void {
+  if (live) clearTimeout(live.timer);
+  live = null;
+}
+
+/** Open (or force-refresh) the drawer's current tab. */
+async function loadTab(): Promise<void> {
+  if (!drawer) return;
+  const key = liveKey(drawer.row, drawer.tab);
+  if (live?.key !== key) {
+    stopLive();
+    live = { key, version: "", timer: 0, busy: false, loaded: false, messages: [], nodes: new Map(),
+      pending: [], model: null, contextTokens: null, logs: null };
+    el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
+  } else {
+    live.version = "";
+  }
+  await pollLive();
+}
+
+async function pollLive(): Promise<void> {
+  const cur = live;
+  if (!cur || !drawer) return;
+  clearTimeout(cur.timer);
+  if (!document.hidden && !cur.busy) {
+    cur.busy = true;
+    try {
+      if (drawer.tab === "logs") await pollLogs(cur, drawer.row);
+      else await pollTranscript(cur, drawer.row);
+    } catch (e) {
+      if (!(e instanceof Unauthorized) && live === cur && !cur.loaded) {
+        el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "error" }, `Không tải được: ${String(e)}`));
+      }
+    } finally {
+      cur.busy = false;
+    }
+  }
+  if (live !== cur) return;
+  const fast = drawer?.row.state === "working" || cur.pending.length > 0;
+  cur.timer = window.setTimeout(() => { void pollLive(); }, fast ? LIVE_FAST_MS : LIVE_SLOW_MS);
+}
+
+/** Run `update`, then stay pinned to the bottom if the reader was there; else keep their place. */
+function keepScroll(update: () => void, toBottom: boolean): void {
+  const body = el("d-body", HTMLDivElement);
+  const atBottom = toBottom || body.scrollHeight - body.scrollTop - body.clientHeight < NEAR_BOTTOM_PX;
+  const top = body.scrollTop;
+  update();
+  body.scrollTop = atBottom ? body.scrollHeight : top;
+}
+
+async function pollLogs(cur: Live, s: Row): Promise<void> {
+  const d = obj(await api(`${mpath(s.machine)}/${encodeURIComponent(s.id)}/logs`));
+  const logs = str(d.logs) || "(trống)";
+  if (live !== cur || logs === cur.logs) return;
+  const first = !cur.loaded;
+  cur.logs = logs; cur.loaded = true;
+  keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(h("pre", { class: "logs" }, logs)), first);
+}
+
+async function pollTranscript(cur: Live, s: Row): Promise<void> {
+  if (!s.sessionId) {
+    cur.loaded = true;
+    el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "muted" }, "Không có transcript."));
+    return;
+  }
+  const q = new URLSearchParams({ limit: String(TRANSCRIPT_LIMIT) });
+  if (cur.version) q.set("since", cur.version);
+  const t = parseTranscript(await api(`${mpath(s.machine)}/${encodeURIComponent(s.sessionId)}/transcript?${q.toString()}`));
+  if (live !== cur) return;
+  if (!t.unchanged) {
+    cur.version = t.version; cur.messages = t.messages;
+    cur.model = t.model ?? cur.model; cur.contextTokens = t.contextTokens ?? cur.contextTokens;
+  }
+  const first = !cur.loaded;
+  cur.loaded = true;
+  renderConversation(cur, first);
+  if (first || !t.unchanged) renderDrawerHead();
+  // The session's state (working → done) lives in the fleet list, polled every REFRESH_MS.
+  // Claude's daemon flips it a few seconds after the last reply, so while someone watches
+  // a working session, follow it at the drawer's pace instead.
+  if (!first && (!t.unchanged || s.state === "working")) void refresh();
+}
+
+/** The "Claude is working" line: which tool runs right now, if any. */
+function workingNode(msgs: Message[]): HTMLDivElement | null {
+  if (drawer?.row.state !== "working") return null;
+  const last = msgs[msgs.length - 1];
+  const doing = last?.role === "tool" && last.tool?.result === null ? `đang chạy ${last.text}` : "đang làm việc";
+  return h("div", { class: "msg working", "aria-live": "polite" }, h("span", { class: "dots" }), `Claude ${doing}…`);
+}
+
+function renderConversation(cur: Live, toBottom: boolean): void {
+  const msgs = cur.messages;
+  const now = Date.now();
+  cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && !arrived(msgs, p));
+  const next = new Map<string, { sig: string; node: HTMLElement }>();
+  const nodes: Node[] = msgs.map((m, k) => {
+    const id = m.id ?? `i${k}`;
+    const sig = JSON.stringify(m);
+    const old = cur.nodes.get(id);
+    const node = old?.sig === sig ? old.node : messageNode(m);
+    const who = node.querySelector(":scope > .who");
+    if (node === old?.node && who && m.role !== "tool") who.textContent = `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`;
+    if (old && old.node !== node && old.node.querySelector("details")?.open) {
+      node.querySelector("details")?.setAttribute("open", "");
+    }
+    next.set(id, { sig, node });
+    return node;
+  });
+  cur.nodes = next;
+  nodes.push(...cur.pending.map((p) => h("div", { class: "msg user pending" },
+    h("div", { class: "who" }, `${ROLE_LABEL.user} · đã gửi, chờ Claude nhận…`), p.text)));
+  const working = workingNode(msgs);
+  if (working) nodes.push(working);
+  if (!nodes.length) nodes.push(h("p", { class: "muted" }, "Chưa có tin nhắn."));
+  keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(...nodes), toBottom);
+}
+
 function openDrawer(row: Row): void {
+  if (drawer && liveKey(drawer.row, drawer.tab) !== liveKey(row, "transcript")) stopLive();  // no stale model/tokens in the head
   drawer = { row, tab: "transcript" };
   el("drawer", HTMLDivElement).hidden = false;
   renderDrawerHead();
   void loadTab();
 }
-function closeDrawer(): void { drawer = null; el("drawer", HTMLDivElement).hidden = true; }
+function closeDrawer(): void { drawer = null; stopLive(); messageFiles?.clear(); el("drawer", HTMLDivElement).hidden = true; }
 
 async function sendMessage(e: Event): Promise<void> {
   e.preventDefault();
@@ -542,17 +922,32 @@ async function sendMessage(e: Event): Promise<void> {
   const force = el("d-force", HTMLInputElement);
   const target = s.pid != null ? s.id : (s.sessionId ?? s.id);
   const submit = el("d-compose", HTMLFormElement).querySelector("button[type=submit]");
+  const note = el("d-compose-note", HTMLSpanElement);
+  const noteText = note.textContent;
   if (submit instanceof HTMLButtonElement) submit.disabled = true;
+  // Show the message at once, as a terminal would; stopping/resuming the session takes seconds.
+  const typed = text.value;
+  const shownIn = live && drawer.tab === "transcript" ? live : null;
+  const bubble: Pending = { text: typed, at: Date.now(), after: shownIn?.messages.at(-1)?.id ?? null };
+  if (shownIn) { shownIn.pending.push(bubble); renderConversation(shownIn, true); }
   try {
+    const paths = await messageFiles?.upload(s.machine) ?? [];
     const r = await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`,
-      { text: text.value, force: force.checked });
-    text.value = ""; force.checked = false;
+      { text: withPaths(typed, paths), force: force.checked });
+    text.value = ""; force.checked = false; messageFiles?.clear();
+    // A resume can give the job a new short id; keep the drawer on it.
+    if (drawer?.row === s && r.id && r.id !== s.id) drawer.row = { ...s, id: r.id };
     toast(`Đã gửi tới ${r.id ?? s.id}`);
     await refresh();
-    void loadTab();
+    void pollLive();
   } catch (err) {
+    if (shownIn) {
+      shownIn.pending = shownIn.pending.filter((p) => p !== bubble);
+      if (live === shownIn) renderConversation(shownIn, false);
+    }
     if (!(err instanceof Unauthorized)) toast(`Gửi lỗi: ${err instanceof Error ? err.message : String(err)}`, true);
   } finally {
+    note.textContent = noteText;
     if (submit instanceof HTMLButtonElement) submit.disabled = false;
   }
 }
@@ -582,18 +977,24 @@ async function startSession(e: Event): Promise<void> {
   e.preventDefault();
   const machine = el("n-machine", HTMLSelectElement).value;
   const prompt = el("n-prompt", HTMLTextAreaElement);
+  const submit = el("new-form", HTMLFormElement).querySelector("button[type=submit]");
+  if (submit instanceof HTMLButtonElement) submit.disabled = true;
   try {
+    const paths = await sessionFiles?.upload(machine) ?? [];
     const r = await write("POST", mpath(machine), {
-      cwd: el("n-cwd", HTMLInputElement).value.trim(), prompt: prompt.value,
+      cwd: el("n-cwd", HTMLInputElement).value.trim(), prompt: withPaths(prompt.value, paths),
       name: el("n-name", HTMLInputElement).value.trim() || null,
       permissionMode: el("n-mode", HTMLSelectElement).value || null,
     });
-    prompt.value = ""; el("n-name", HTMLInputElement).value = "";
+    prompt.value = ""; el("n-name", HTMLInputElement).value = ""; sessionFiles?.clear();
     el("modal", HTMLDivElement).hidden = true;
     toast(`Đã tạo session ${r.id ?? ""}`);
     await refresh();
   } catch (err) {
     if (!(err instanceof Unauthorized)) toast(`Không tạo được: ${err instanceof Error ? err.message : String(err)}`, true);
+  } finally {
+    el("n-note", HTMLSpanElement).textContent = "";
+    if (submit instanceof HTMLButtonElement) submit.disabled = false;
   }
 }
 
@@ -715,6 +1116,8 @@ function wire(): void {
   el("d-close", HTMLButtonElement).addEventListener("click", closeDrawer);
   el("drawer", HTMLDivElement).addEventListener("click", (e) => { if (e.target === e.currentTarget) closeDrawer(); });
   el("d-compose", HTMLFormElement).addEventListener("submit", (e) => { void sendMessage(e); });
+  messageFiles = wireAttachments("d", el("d-compose", HTMLFormElement), el("d-text", HTMLTextAreaElement), "d-compose-note");
+  sessionFiles = wireAttachments("n", el("new-form", HTMLFormElement), el("n-prompt", HTMLTextAreaElement), "n-note");
   for (const b of document.querySelectorAll<HTMLButtonElement>(".tabs button")) {
     b.addEventListener("click", () => {
       const tab = b.dataset.tab;
@@ -739,7 +1142,11 @@ function wire(): void {
     else if (!el("modal", HTMLDivElement).hidden) el("modal", HTMLDivElement).hidden = true;
     else if (drawer) closeDrawer();
   });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && timer) void refresh(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !timer) return;
+    void refresh();
+    void pollLive();  // back from the background (iPhone): catch up at once
+  });
 }
 
 wire();

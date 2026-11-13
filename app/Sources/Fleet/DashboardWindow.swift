@@ -79,6 +79,20 @@ final class DashboardWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, W
         return nil
     }
 
+    // <input type=file> (📎 attachments): WKWebView on macOS shows no picker unless the app does.
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        guard let window else {
+            completionHandler(panel.runModal() == .OK ? panel.urls : nil)
+            return
+        }
+        panel.beginSheetModal(for: window) { completionHandler($0 == .OK ? panel.urls : nil) }
+    }
+
     // window.confirm / alert from the dashboard (Xoá, …)
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {

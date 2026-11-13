@@ -11,13 +11,17 @@ import json
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
+from fleetd import markdown, tool_calls
 from fleetd.models import Message, TranscriptSummary
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SUMMARY_TAIL = 512 * 1024
-TRANSCRIPT_TAIL = 4 * 1024 * 1024
+TRANSCRIPT_TAIL = 8 * 1024 * 1024  # long sessions log big request records between messages
+USER_CHARS = 20000
+ASSISTANT_CHARS = 50000
 
 Record = dict[str, object]
 
@@ -69,14 +73,6 @@ def _is_human(rec: Record) -> bool:
     return bool(_text_of(content).strip())
 
 
-def _tool_line(block: dict[str, object]) -> str:
-    name = str(block.get("name", "tool"))
-    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
-    hint = next((inp[k] for k in ("description", "command", "file_path", "prompt") if inp.get(k)), "")
-    hint = str(hint).replace("\n", " ")
-    return f"{name}: {hint[:140]}" if hint else name
-
-
 def _str(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
@@ -112,31 +108,87 @@ def summarize(path: Path) -> TranscriptSummary:
     if not s.updated_at:
         s.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
     s.last_prompt = clip(s.last_prompt, 300)
-    s.last_reply = clip(s.last_reply, 400)
+    s.last_reply = clip(markdown.to_plain(s.last_reply) if s.last_reply else None, 400)
     return s
 
 
-def messages(path: Path, limit: int = 60) -> list[Message]:
-    """Human prompts, assistant text and one-line tool calls, newest last."""
-    out: list[Message] = []
-    for r in _read_tail(path, TRANSCRIPT_TAIL):
-        if r.get("isSidechain"):
+@dataclass(frozen=True)
+class Conversation:
+    messages: list[Message]
+    model: str | None = None
+    context_tokens: int | None = None  # prompt size of the latest reply
+
+
+def _tool_results(records: list[Record]) -> dict[str, Record]:
+    """tool_use_id → its tool_result block (they arrive in the next user record)."""
+    out: dict[str, Record] = {}
+    for r in records:
+        content = _content(r)
+        if r.get("type") != "user" or not isinstance(content, list):
             continue
+        for b in content:
+            if not (isinstance(b, dict) and b.get("type") == "tool_result"):
+                continue
+            if isinstance(use_id := b.get("tool_use_id"), str):
+                out[use_id] = b
+    return out
+
+
+def _context_tokens(usage: object) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    total = sum(v for k in keys if isinstance(v := usage.get(k), int))
+    return total or None
+
+
+def conversation(path: Path, limit: int = 60) -> Conversation:
+    """Human prompts, assistant text and tool calls (with their results), newest last."""
+    records = [r for r in _read_tail(path, TRANSCRIPT_TAIL) if not r.get("isSidechain")]
+    results = _tool_results(records)
+    out: list[Message] = []
+    model: str | None = None
+    context: int | None = None
+    for n, r in enumerate(records):
         ts = _str(r.get("timestamp"))
+        rid = _str(r.get("uuid")) or f"r{n}"
         if _is_human(r):
-            out.append(Message(role="user", text=clip(_text_of(_content(r)), 4000) or "", ts=ts))
+            text = clip(_text_of(_content(r)), USER_CHARS) or ""
+            out.append(Message(role="user", id=rid, ts=ts, text=text))
             continue
         content = _content(r)
         if r.get("type") != "assistant" or not isinstance(content, list):
             continue
-        for b in content:
+        msg = r.get("message")
+        if isinstance(msg, dict):
+            model = _str(msg.get("model")) or model
+            context = _context_tokens(msg.get("usage")) or context
+        for k, b in enumerate(content):
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "text" and str(b.get("text", "")).strip():
-                out.append(Message(role="assistant", text=clip(str(b["text"]), 6000) or "", ts=ts))
+                text = clip(str(b["text"]), ASSISTANT_CHARS) or ""
+                out.append(Message(role="assistant", id=f"{rid}:{k}", ts=ts, text=text))
             elif b.get("type") == "tool_use":
-                out.append(Message(role="tool", text=_tool_line(b), ts=ts))
-    return out[-limit:]
+                inp = b.get("input")
+                name = _str(b.get("name")) or "tool"
+                result = results.get(use_id) if isinstance(use_id := b.get("id"), str) else None
+                out.append(Message(role="tool", id=f"{rid}:{k}", ts=ts,
+                                   text=tool_calls.title(name, inp if isinstance(inp, dict) else {}),
+                                   tool=tool_calls.describe(b, result)))
+    kept = [m.model_copy(update={"blocks": markdown.parse(m.text)}) if m.role == "assistant" else m
+            for m in out[-limit:]]
+    return Conversation(messages=kept, model=model, context_tokens=context)
+
+
+def messages(path: Path, limit: int = 60) -> list[Message]:
+    return conversation(path, limit).messages
+
+
+def version(path: Path) -> str:
+    """Changes whenever the file does; cheap enough to check on every poll."""
+    st = path.stat()
+    return f"{st.st_mtime_ns}-{st.st_size}"
 
 
 class TranscriptIndex:

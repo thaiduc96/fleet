@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fleetd.models import Message
+from fleetd.models import Block, Inline, Message, ToolCall
 from fleetd.transcripts import TranscriptIndex, messages, summarize
 from tests.conftest import HIST_SID, SID, rec, write_transcript
 
@@ -32,15 +32,17 @@ def test_summarize_clips_long_prompt_to_300_chars(tmp_path: Path) -> None:
     assert s.last_prompt == "x" * 299 + "…"
 
 
-def test_messages_skips_tool_results_and_sidechains(claude_home: Path) -> None:
+def test_messages_pair_tool_calls_with_their_results_and_skip_sidechains(claude_home: Path) -> None:
     path = claude_home / PROJECT / f"{SID}.jsonl"
 
     result = messages(path)
 
     assert result == [
-        Message(role="user", text="xin chào", ts="2026-11-13T12:00:00Z"),
-        Message(role="assistant", text="Chào bạn", ts="2026-11-13T12:00:05Z"),
-        Message(role="tool", text="Bash: List files", ts="2026-11-13T12:00:05Z"),
+        Message(role="user", text="xin chào", ts="2026-11-13T12:00:00Z", id="r1"),
+        Message(role="assistant", text="Chào bạn", ts="2026-11-13T12:00:05Z", id="r2:0",
+                blocks=[Block(type="paragraph", inlines=[Inline(type="text", text="Chào bạn")])]),
+        Message(role="tool", text="Bash: List files", ts="2026-11-13T12:00:05Z", id="r2:1",
+                tool=ToolCall(name="Bash", detail="ls", result="a b")),
     ]
 
 

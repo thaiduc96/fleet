@@ -15,10 +15,11 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
+from typing import Annotated, TypeVar
+from urllib.parse import urlencode
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -55,6 +56,7 @@ from fleetd.models import (
     SettingsBody,
     Transcript,
     UpdateResult,
+    Upload,
 )
 from fleetd.peers import (
     PeerClient,
@@ -65,9 +67,12 @@ from fleetd.peers import (
     response_detail,
 )
 from fleetd.state import StateFile
-from fleetd.transcripts import TranscriptIndex, messages
+from fleetd.transcripts import TranscriptIndex, conversation
+from fleetd.transcripts import version as transcript_version
+from fleetd.uploads import MAX_UPLOAD_BYTES, Uploads
 
 M = TypeVar("M", bound=BaseModel)
+UploadName = Annotated[str, Query(min_length=1, max_length=255)]
 WEB_DIR = Path(__file__).resolve().parent / "web"
 log = logging.getLogger("fleetd")
 
@@ -93,7 +98,8 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
                spawn: Spawn = spawn_process,
                health_fn: Callable[[Awake | None, int | None], Health] = system.health,
                git: Git = run_git,
-               app_version: str | None = None) -> FastAPI:
+               app_version: str | None = None,
+               wall_clock: Callable[[], float] = time.time) -> FastAPI:
     cfg = cfg or _config_from_env()
     token = token or auth.load_token(cfg.token)
     # Set by Fleet.app when it launches fleetd; absent for the old LaunchAgent install.
@@ -110,6 +116,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     state = StateFile(cfg.home / "state.json")
     registry = PeerRegistry(cfg.peers, state, cfg.machine, own_url=lambda: my_url())
     keep = KeepAwake(state, default_mode, spawn=spawn)
+    uploads = Uploads(cfg.home / "uploads", now=wall_clock)
     rt = Runtime()
 
     def my_label() -> str:
@@ -130,6 +137,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         log.info("fleetd %s (%s, app %s), %d peer(s)", cfg.machine, rt.claude_version,
                  app_version or "-", len(registry.all()))
         await asyncio.to_thread(keep.start)
+        await asyncio.to_thread(uploads.prune)
         try:
             async with PeerClient(registry, token, cfg.cache_dir, client=peer_http) as peers:
                 rt.peers = peers
@@ -190,12 +198,17 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     def local_snap() -> MachineSnapshot:
         return snapshot.build(cfg, cli, idx, rt.claude_version, current_health(), identity())
 
-    def read_transcript(session_id: str, limit: int) -> Transcript:
+    def read_transcript(session_id: str, limit: int, since: str | None = None) -> Transcript:
         path = idx.find(session_id)
         if not path:
             raise HTTPException(404, "transcript not found")
-        return Transcript(session_id=session_id, summary=idx.summary(path),
-                          messages=messages(path, limit=max(1, min(limit, 400))))
+        current = transcript_version(path)
+        if since == current:  # the dashboard polls; most polls change nothing
+            return Transcript(session_id=session_id, summary=idx.summary(path), messages=[],
+                              version=current, unchanged=True)
+        conv = conversation(path, limit=max(1, min(limit, 400)))
+        return Transcript(session_id=session_id, summary=idx.summary(path), messages=conv.messages,
+                          version=current, model=conv.model, context_tokens=conv.context_tokens)
 
     def read_logs(ident: str) -> Logs:
         if not ID_RE.fullmatch(ident):
@@ -299,8 +312,8 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return relay(machine, r)
 
     @app.get("/api/sessions/{session_id}/transcript", dependencies=[Depends(require)])
-    def transcript(session_id: str, limit: int = 60) -> Transcript:
-        return read_transcript(session_id, limit)
+    def transcript(session_id: str, limit: int = 60, since: str | None = None) -> Transcript:
+        return read_transcript(session_id, limit, since)
 
     @app.get("/api/sessions/{ident}/logs", dependencies=[Depends(require)])
     def logs(ident: str) -> Logs:
@@ -313,19 +326,21 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return Fleet(self_machine=cfg.machine, machines=[mine, *others])
 
     @app.get("/api/m/{machine}/sessions/{ident}/{what}", dependencies=[Depends(require)])
-    async def per_machine(machine: str, ident: str, what: str, limit: int = 60) -> Response:
+    async def per_machine(machine: str, ident: str, what: str, limit: int = 60,
+                          since: str | None = None) -> Response:
         """Read-only proxy so the dashboard talks to one origin only."""
         if what not in ("transcript", "logs") or not ID_RE.fullmatch(ident):
             raise HTTPException(404)
         if machine == cfg.machine:
             if what == "transcript":
-                body = await asyncio.to_thread(read_transcript, ident, limit)
+                body = await asyncio.to_thread(read_transcript, ident, limit, since)
             else:
                 body = await asyncio.to_thread(read_logs, ident)
             return Response(body.model_dump_json(), media_type="application/json")
         if machine not in peers().peers:
             raise HTTPException(404, f"unknown machine {machine}")
-        path = f"/api/sessions/{ident}/{what}" + (f"?limit={limit}" if what == "transcript" else "")
+        query = urlencode({"limit": limit, **({"since": since} if since else {})})
+        path = f"/api/sessions/{ident}/{what}" + (f"?{query}" if what == "transcript" else "")
         try:
             r = await peers().get(machine, path)
         except httpx.HTTPError as e:
@@ -465,6 +480,40 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     async def m_remove(machine: str, ident: str) -> Response:
         check_id(ident)
         return await on_machine(machine, "DELETE", f"/api/sessions/{ident}", lambda: actions.remove(ident))
+
+    # ---- attachments -----------------------------------------------------
+    async def read_upload(request: Request) -> bytes:
+        """The raw request body, refused with 413 as soon as it passes the limit."""
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"file too large: {declared} bytes (max {MAX_UPLOAD_BYTES})")
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @app.post("/api/uploads", dependencies=[Depends(require_write)])
+    async def upload(request: Request, name: UploadName) -> Upload:
+        data = await read_upload(request)
+        return await asyncio.to_thread(uploads.save, name, data)
+
+    @app.post("/api/m/{machine}/uploads", dependencies=[Depends(require_write)])
+    async def m_upload(machine: str, request: Request, name: UploadName) -> Response:
+        data = await read_upload(request)
+        if machine == cfg.machine:
+            result = await asyncio.to_thread(uploads.save, name, data)
+            return Response(result.model_dump_json(), media_type="application/json")
+        if machine not in peers().peers:
+            raise HTTPException(404, f"unknown machine {machine}")
+        try:
+            r = await peers().upload(machine, name, data)
+        except httpx.HTTPError as e:
+            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+        return relay(machine, r)
 
     # ---- dashboard -------------------------------------------------------
     @app.get("/")

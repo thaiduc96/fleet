@@ -21,6 +21,7 @@ from fleetd.state import StateFile
 
 log = logging.getLogger(__name__)
 WRITE_TIMEOUT = 75.0
+UPLOAD_TIMEOUT = 120.0  # 25 MB over a slow tailnet hop
 # FastAPI's own replies for a route the peer does not have at all.
 ROUTE_MISSING = {(404, "Not Found"), (405, "Method Not Allowed")}
 
@@ -271,6 +272,15 @@ class PeerClient:
         return await self.client.request(
             method, f"{self._peer(machine).url}{path}", json=json_body,
             headers={WRITE_HEADER: "1"}, timeout=WRITE_TIMEOUT,
+        )
+
+
+    async def upload(self, machine: str, name: str, data: bytes) -> httpx.Response:
+        """Send an attachment's bytes to the peer that runs the session."""
+        return await self.client.post(
+            f"{self._peer(machine).url}/api/uploads", params={"name": name}, content=data,
+            headers={WRITE_HEADER: "1", "content-type": "application/octet-stream"},
+            timeout=UPLOAD_TIMEOUT,
         )
 
 

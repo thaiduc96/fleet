@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -151,16 +152,84 @@ class TranscriptSummary(ApiModel):
     continued_in: str | None = None
 
 
+class Inline(ApiModel):
+    """A span inside a paragraph, heading or table cell.
+
+    text/code carry `text`; strong/em/link carry `children`; link also `href`
+    (only http, https and mailto ever reach the dashboard).
+    """
+
+    type: Literal["text", "code", "strong", "em", "link"]
+    text: str = ""
+    children: list[Inline] = []
+    href: str | None = None
+
+
+Align = Literal["left", "center", "right"] | None
+
+
+class Block(ApiModel):
+    """One Markdown block, parsed server-side so the dashboard only builds DOM nodes."""
+
+    type: Literal["heading", "paragraph", "code", "list", "quote", "table", "rule"]
+    level: int | None = None              # heading 1-6
+    inlines: list[Inline] = []            # heading, paragraph
+    lang: str | None = None               # code
+    text: str | None = None               # code
+    ordered: bool = False                 # list
+    start: int | None = None              # ordered list first number
+    items: list[list[Block]] = []         # list: blocks of each item
+    children: list[Block] = []            # quote
+    align: list[Align] = []               # table
+    header: list[list[Inline]] = []       # table
+    rows: list[list[list[Inline]]] = []   # table
+
+
+class Question(ApiModel):
+    """One question Claude asked with AskUserQuestion."""
+
+    question: str
+    header: str | None = None
+    options: list[str] = []
+
+
+TodoStatus = Literal["pending", "in_progress", "completed"]
+
+
+class Todo(ApiModel):
+    content: str
+    status: TodoStatus = "pending"
+
+
+class ToolCall(ApiModel):
+    """What a tool call did, for the expandable line in the conversation."""
+
+    name: str
+    detail: str | None = None        # command, diff, file content… (clipped)
+    result: str | None = None        # the tool's output (clipped); None while it is still running
+    is_error: bool = False
+    questions: list[Question] = []   # AskUserQuestion
+    todos: list[Todo] = []           # TodoWrite
+    plan: list[Block] | None = None  # ExitPlanMode: the plan as Markdown
+
+
 class Message(ApiModel):
     role: str  # "user" | "assistant" | "tool"
-    text: str
+    text: str  # tool: the one-line title (older dashboards show only this)
     ts: str | None = None
+    id: str | None = None              # stable across reads: record uuid + block index
+    blocks: list[Block] | None = None  # assistant replies: parsed Markdown; None for plain text
+    tool: ToolCall | None = None       # role "tool" only
 
 
 class Transcript(ApiModel):
     session_id: str
     summary: TranscriptSummary
     messages: list[Message]
+    version: str = ""        # changes whenever the transcript file does; pass back as ?since=
+    unchanged: bool = False  # ?since= matched: messages is empty, keep what you have
+    model: str | None = None
+    context_tokens: int | None = None  # prompt size of the latest reply (input + cache)
 
 
 class Session(ApiModel):
@@ -289,6 +358,14 @@ class NewSessionBody(ApiModel):
 class MessageBody(ApiModel):
     text: str = Field(min_length=1, max_length=20000)
     force: bool = False  # stop a session that is still working
+
+
+class Upload(ApiModel):
+    """A file attached from the dashboard, saved on the machine that runs the session."""
+
+    path: str
+    name: str
+    size: int
 
 
 class ActionResult(ApiModel):
