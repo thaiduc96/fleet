@@ -216,6 +216,102 @@ async function write(method, path, body) {
     return parseAction(await send(method, path, body));
 }
 const mpath = (machine) => `/api/m/${encodeURIComponent(machine)}/sessions`;
+// ---------------------------------------------------------------- attachments
+// Like Claude Code's own pasted images: the file is saved on the machine that runs the
+// session and its path goes into the message, so Claude reads it with its Read tool.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // fleetd/uploads.py MAX_UPLOAD_BYTES
+class Attachments {
+    chips;
+    picker;
+    busyNote;
+    files = [];
+    constructor(chips, picker, busyNote) {
+        this.chips = chips;
+        this.picker = picker;
+        this.busyNote = busyNote;
+    }
+    add(files) {
+        for (const f of files) {
+            if (f.size > MAX_UPLOAD_BYTES) {
+                toast(`"${f.name}" quá lớn (${size(f.size)}, tối đa ${size(MAX_UPLOAD_BYTES)}).`, true);
+                continue;
+            }
+            this.files.push(f);
+        }
+        this.render();
+    }
+    clear() { this.files = []; this.picker.value = ""; this.render(); }
+    /** Upload every file to `machine`; returns their saved paths, or throws naming the file that failed. */
+    async upload(machine) {
+        const paths = [];
+        for (const [k, f] of this.files.entries()) {
+            this.busyNote.textContent = `Đang tải lên ${k + 1}/${this.files.length}: ${f.name}…`;
+            try {
+                const saved = obj(await api(`/api/m/${encodeURIComponent(machine)}/uploads?name=${encodeURIComponent(f.name || "file")}`, {
+                    method: "POST", headers: { [WRITE_HEADER]: "1", "Content-Type": "application/octet-stream" }, body: f,
+                }));
+                const path = str(saved.path);
+                if (!path)
+                    throw new Error("máy đích không trả về đường dẫn");
+                paths.push(path);
+            }
+            catch (err) {
+                if (err instanceof Unauthorized)
+                    throw err;
+                throw new Error(`tải "${f.name}" lên thất bại: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
+        return paths;
+    }
+    render() {
+        this.chips.hidden = !this.files.length;
+        this.chips.replaceChildren(...this.files.map((f, k) => h("span", { class: "chip" }, h("span", { class: "chip-name", title: f.name }, f.name || "file"), h("span", { class: "muted" }, size(f.size)), h("button", { type: "button", class: "ghost", "aria-label": `Bỏ ${f.name}`, onclick: () => {
+                this.files.splice(k, 1);
+                this.render();
+            } }, "✕"))));
+    }
+}
+function size(bytes) {
+    if (bytes < 1024)
+        return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+        return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+/** The message as Claude Code's CLI would send it: text, then one attached path per line. */
+const withPaths = (text, paths) => (paths.length ? `${text}\n\n${paths.join("\n")}` : text);
+/** 📎 button, paste and drag-and-drop for one form. */
+function wireAttachments(prefix, target, text, noteId) {
+    const picker = el(`${prefix}-file`, HTMLInputElement);
+    const files = new Attachments(el(`${prefix}-files`, HTMLDivElement), picker, el(noteId, HTMLSpanElement));
+    el(`${prefix}-attach`, HTMLButtonElement).addEventListener("click", () => picker.click());
+    picker.addEventListener("change", () => { files.add(picker.files ?? []); picker.value = ""; });
+    text.addEventListener("paste", (e) => {
+        const pasted = e.clipboardData?.files;
+        if (!pasted?.length)
+            return;
+        files.add(pasted);
+        // A copied image also carries text (its name/URL): keep only the file.
+        e.preventDefault();
+    });
+    target.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer?.types.includes("Files"))
+            return;
+        e.preventDefault();
+        target.classList.add("dropping");
+    });
+    target.addEventListener("dragleave", () => target.classList.remove("dropping"));
+    target.addEventListener("drop", (e) => {
+        target.classList.remove("dropping");
+        if (!e.dataTransfer?.files.length)
+            return;
+        e.preventDefault();
+        files.add(e.dataTransfer.files);
+    });
+    return files;
+}
+let messageFiles = null;
+let sessionFiles = null;
 // ---------------------------------------------------------------- state
 let fleet = null;
 let prevStates = null;
@@ -583,7 +679,7 @@ function openDrawer(row) {
     renderDrawerHead();
     void loadTab();
 }
-function closeDrawer() { drawer = null; el("drawer", HTMLDivElement).hidden = true; }
+function closeDrawer() { drawer = null; messageFiles?.clear(); el("drawer", HTMLDivElement).hidden = true; }
 async function sendMessage(e) {
     e.preventDefault();
     if (!drawer)
@@ -593,12 +689,16 @@ async function sendMessage(e) {
     const force = el("d-force", HTMLInputElement);
     const target = s.pid != null ? s.id : (s.sessionId ?? s.id);
     const submit = el("d-compose", HTMLFormElement).querySelector("button[type=submit]");
+    const note = el("d-compose-note", HTMLSpanElement);
+    const noteText = note.textContent;
     if (submit instanceof HTMLButtonElement)
         submit.disabled = true;
     try {
-        const r = await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`, { text: text.value, force: force.checked });
+        const paths = await messageFiles?.upload(s.machine) ?? [];
+        const r = await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`, { text: withPaths(text.value, paths), force: force.checked });
         text.value = "";
         force.checked = false;
+        messageFiles?.clear();
         toast(`Đã gửi tới ${r.id ?? s.id}`);
         await refresh();
         void loadTab();
@@ -608,6 +708,7 @@ async function sendMessage(e) {
             toast(`Gửi lỗi: ${err instanceof Error ? err.message : String(err)}`, true);
     }
     finally {
+        note.textContent = noteText;
         if (submit instanceof HTMLButtonElement)
             submit.disabled = false;
     }
@@ -640,14 +741,19 @@ async function startSession(e) {
     e.preventDefault();
     const machine = el("n-machine", HTMLSelectElement).value;
     const prompt = el("n-prompt", HTMLTextAreaElement);
+    const submit = el("new-form", HTMLFormElement).querySelector("button[type=submit]");
+    if (submit instanceof HTMLButtonElement)
+        submit.disabled = true;
     try {
+        const paths = await sessionFiles?.upload(machine) ?? [];
         const r = await write("POST", mpath(machine), {
-            cwd: el("n-cwd", HTMLInputElement).value.trim(), prompt: prompt.value,
+            cwd: el("n-cwd", HTMLInputElement).value.trim(), prompt: withPaths(prompt.value, paths),
             name: el("n-name", HTMLInputElement).value.trim() || null,
             permissionMode: el("n-mode", HTMLSelectElement).value || null,
         });
         prompt.value = "";
         el("n-name", HTMLInputElement).value = "";
+        sessionFiles?.clear();
         el("modal", HTMLDivElement).hidden = true;
         toast(`Đã tạo session ${r.id ?? ""}`);
         await refresh();
@@ -655,6 +761,11 @@ async function startSession(e) {
     catch (err) {
         if (!(err instanceof Unauthorized))
             toast(`Không tạo được: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+    finally {
+        el("n-note", HTMLSpanElement).textContent = "";
+        if (submit instanceof HTMLButtonElement)
+            submit.disabled = false;
     }
 }
 // ---------------------------------------------------------------- wiring
@@ -778,6 +889,8 @@ function wire() {
     el("drawer", HTMLDivElement).addEventListener("click", (e) => { if (e.target === e.currentTarget)
         closeDrawer(); });
     el("d-compose", HTMLFormElement).addEventListener("submit", (e) => { void sendMessage(e); });
+    messageFiles = wireAttachments("d", el("d-compose", HTMLFormElement), el("d-text", HTMLTextAreaElement), "d-compose-note");
+    sessionFiles = wireAttachments("n", el("new-form", HTMLFormElement), el("n-prompt", HTMLTextAreaElement), "n-note");
     for (const b of document.querySelectorAll(".tabs button")) {
         b.addEventListener("click", () => {
             const tab = b.dataset.tab;

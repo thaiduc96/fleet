@@ -52,7 +52,10 @@
     <div id="d-body" class="d-body"></div>
     <form id="d-compose" class="compose" hidden>
       <textarea id="d-text" rows="2" placeholder="Gửi tiếp chỉ thị cho session này…" required></textarea>
+      <div id="d-files" class="chips" aria-live="polite" hidden></div>
+      <input id="d-file" type="file" multiple hidden>
       <div class="compose-row">
+        <button type="button" id="d-attach" class="ghost attach" title="Đính kèm file (hoặc dán / kéo-thả vào đây)" aria-label="Đính kèm file">📎</button>
         <label id="d-force-wrap" class="toggle" hidden><input id="d-force" type="checkbox"> Dừng rồi gửi</label>
         <span id="d-compose-note" class="muted"></span>
         <button type="submit" class="primary">Gửi</button>
@@ -80,8 +83,14 @@
       </label>
     </div>
     <label>Prompt <textarea id="n-prompt" rows="5" required></textarea></label>
+    <div id="n-files" class="chips" aria-live="polite" hidden></div>
+    <input id="n-file" type="file" multiple hidden>
     <p class="muted">Chạy <code>claude --bg</code> trên máy đã chọn. Thư mục phải nằm trong home và đã được trust.</p>
-    <div class="compose-row"><span></span><button type="submit" class="primary">Bắt đầu</button></div>
+    <div class="compose-row">
+      <button type="button" id="n-attach" class="ghost attach" title="Đính kèm file (hoặc dán / kéo-thả vào đây)" aria-label="Đính kèm file">📎</button>
+      <span id="n-note" class="muted"></span>
+      <button type="submit" class="primary">Bắt đầu</button>
+    </div>
   </form>
 </div>
 

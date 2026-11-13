@@ -326,6 +326,14 @@ class MessageBody(ApiModel):
     force: bool = False  # stop a session that is still working
 
 
+class Upload(ApiModel):
+    """A file attached from the dashboard, saved on the machine that runs the session."""
+
+    path: str
+    name: str
+    size: int
+
+
 class ActionResult(ApiModel):
     ok: bool = True
     id: str | None = None
