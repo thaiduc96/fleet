@@ -24,7 +24,6 @@ MODE_IDS: dict[str, SessionMode] = {
 }
 DEFAULT_MODE_HINT = "? for shortcuts"
 MAX_BODY_LINES = 60
-INPUT_BOX_LOOKBACK = 6
 
 
 @dataclass(frozen=True)
@@ -47,9 +46,8 @@ def _mode(lines: list[str]) -> SessionMode | None:
 
 
 def _has_input_box(lines: list[str]) -> bool:
-    """An input box line (PROMPT_MARK alone) means Claude waits for a message, not a menu answer."""
-    tail = [ln.strip() for ln in lines if ln.strip()][-INPUT_BOX_LOOKBACK:]
-    return any(INPUT_BOX_RE.match(ln) and not OPTION_RE.match(ln) for ln in tail)
+    """An input box (PROMPT_MARK alone) below the options: Claude waits for a message, not a menu answer."""
+    return any(INPUT_BOX_RE.match(ln.strip()) and not OPTION_RE.match(ln) for ln in lines)
 
 
 def _option_group(lines: list[str]) -> list[int] | None:
@@ -85,10 +83,8 @@ def _kind(title: str, body: str, labels: list[str]) -> PromptKind:
 
 
 def _prompt(lines: list[str]) -> Prompt | None:
-    if _has_input_box(lines):
-        return None
     group = _option_group(lines)
-    if not group:
+    if not group or _has_input_box(lines[group[-1] + 1:]):
         return None
     options = [_option(lines, k, group) for k in group]
     title_at = next((j for j in range(group[0] - 1, -1, -1)

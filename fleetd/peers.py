@@ -270,11 +270,12 @@ class PeerClient:
         return await self.client.get(f"{self._peer(machine).url}{path}", timeout=timeout)
 
     async def request(self, machine: str, method: str, path: str,
-                      json_body: dict[str, object] | None = None) -> httpx.Response:
+                      json_body: dict[str, object] | None = None,
+                      timeout: float = WRITE_TIMEOUT) -> httpx.Response:
         """State-changing call to a peer (stop/resume can take a few seconds)."""
         return await self.client.request(
             method, f"{self._peer(machine).url}{path}", json=json_body,
-            headers={WRITE_HEADER: "1"}, timeout=WRITE_TIMEOUT,
+            headers={WRITE_HEADER: "1"}, timeout=timeout,
         )
 
 

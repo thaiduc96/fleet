@@ -70,3 +70,10 @@ def test_options_that_do_not_start_at_one_are_not_a_menu() -> None:
 ])
 def test_mode_from_the_footer(footer: str, mode: str | None) -> None:
     assert prompts.parse([PROMPT_MARK, footer]).mode == mode
+
+
+def test_a_numbered_reply_above_a_tall_footer_is_not_a_menu() -> None:
+    lines = ["⏺ Plan:", "  1. Do A", "  2. Do B", "─" * 40, PROMPT_MARK, "─" * 40,
+             "  ⏵⏵ auto mode on", "  ⎿ 1 shell", "  ⎿ 2 agents", "  agent a", "  agent b", "  agent c"]
+
+    assert prompts.parse(lines).prompt is None

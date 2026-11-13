@@ -35,8 +35,9 @@ def test_choosing_an_option_answers_the_menu(make_client: MakeClient) -> None:
     tty = FakeTty(PLAN, {"1": b"\x1b[2J\x1b[H" + IDLE_AUTO})
     c = client_with(make_client, tty)
 
-    r = c.post("/api/m/home/sessions/558c6df2/input", headers=WRITE,
-               json={"input": {"action": "choose", "option": "1"}})
+    choose = {"action": "choose", "option": "1", "title": PLAN_TITLE, "label": "Yes, and use auto mode"}
+
+    r = c.post("/api/m/home/sessions/558c6df2/input", headers=WRITE, json={"input": choose})
 
     assert (r.status_code, r.json()["prompt"], tty.written) == (200, None, ["1"])
 
@@ -83,9 +84,10 @@ def test_only_running_background_sessions_can_be_driven(
 
 def test_menu_errors_come_back_as_http_errors(make_client: MakeClient) -> None:
     c = client_with(make_client, FakeTty(IDLE_AUTO))
-    choose = {"input": {"action": "choose", "option": "1"}}
+    choose = {"input": {"action": "choose", "option": "1", "title": PLAN_TITLE,
+                        "label": "Yes, and use auto mode"}}
 
-    r =c.post("/api/sessions/558c6df2/input", headers=WRITE, json=choose)
+    r = c.post("/api/sessions/558c6df2/input", headers=WRITE, json=choose)
 
     assert r.status_code == 409
 
@@ -107,3 +109,27 @@ def test_screen_and_input_on_a_peer_are_forwarded(make_client: MakeClient) -> No
         ("GET", "/api/sessions/w1/screen", f"Bearer {TOKEN}", None),
         ("POST", "/api/sessions/w1/input", f"Bearer {TOKEN}", {"input": {"action": "mode", "mode": "plan"}}),
     ]
+
+
+PLAN_TITLE = "Claude has written up a plan and is ready to execute. Would you like to proceed?"
+
+
+def test_mode_is_only_switched_while_claude_is_idle(make_client: MakeClient) -> None:
+    tty = FakeTty(IDLE_AUTO)
+    c = client_with(make_client, tty, agents=[agent(state="working", status="busy")])
+
+    mode = {"input": {"action": "mode", "mode": "plan"}}
+
+    r = c.post("/api/sessions/558c6df2/input", headers=WRITE, json=mode)
+
+    assert (r.status_code, tty.written, tty.closed) == (409, [], False)
+
+
+def test_choose_must_name_the_menu_it_answers(make_client: MakeClient) -> None:
+    c = client_with(make_client, FakeTty(PLAN))
+
+    unnamed = {"input": {"action": "choose", "option": "1"}}
+
+    r = c.post("/api/sessions/558c6df2/input", headers=WRITE, json=unnamed)
+
+    assert r.status_code == 422

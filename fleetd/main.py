@@ -28,7 +28,7 @@ from starlette.types import Scope
 
 from fleetd import API_LEVEL, auth, config, snapshot, system
 from fleetd.actions import ActionError, Actions, check_id
-from fleetd.attach import Attacher, AttachError
+from fleetd.attach import Attacher, AttachError, Choice
 from fleetd.awake import KeepAwake, Spawn, spawn_process
 from fleetd.claude_cli import ID_RE, ClaudeCLI, CLIError
 from fleetd.handoff import Git, Handoff, run_git
@@ -58,6 +58,7 @@ from fleetd.models import (
     Roster,
     SessionInputBody,
     SessionScreen,
+    SessionState,
     SettingsBody,
     Transcript,
     UpdateResult,
@@ -82,6 +83,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 VERSIONED_ASSETS = ("app.js", "style.css")
 NO_CACHE = {"Cache-Control": "no-cache"}
 SCREEN_TIMEOUT = 30.0  # a peer attaches to the session and waits for the TUI to settle
+INPUT_TIMEOUT = 180.0  # worst case: waiting for the session lock, then two full mode cycles
 
 
 def versioned_index(web_dir: Path) -> str:
@@ -207,7 +209,8 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return JSONResponse({"detail": e.message}, status_code=e.status)
 
     async def on_machine(machine: str, method: str, path: str,
-                         local: Callable[[], BaseModel], body: BaseModel | None = None) -> Response:
+                         local: Callable[[], BaseModel], body: BaseModel | None = None,
+                         timeout: float | None = None) -> Response:
         """Run an action here, or forward it to the peer that owns the session."""
         if machine == cfg.machine:
             result = await asyncio.to_thread(local)
@@ -215,8 +218,9 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         if machine not in peers().peers:
             raise HTTPException(404, f"unknown machine {machine}")
         try:
-            r = await peers().request(machine, method, path,
-                                      body.model_dump(by_alias=True) if body else None)
+            payload = body.model_dump(by_alias=True) if body else None
+            r = await (peers().request(machine, method, path, payload, timeout=timeout) if timeout
+                       else peers().request(machine, method, path, payload))
         except httpx.HTTPError as e:
             raise HTTPException(504, f"{machine} unreachable: {e}") from e
         return relay(machine, r)
@@ -407,16 +411,22 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
 
     # ---- the session's own terminal (answer menus, mode, esc, typing) -----
     def read_screen(ident: str) -> SessionScreen:
-        return attacher.screen(actions.live_background(ident))
+        short_id, _ = actions.live_background(ident)
+        return attacher.screen(short_id)
 
     def send_input(ident: str, body: SessionInputBody) -> SessionScreen:
-        short_id = actions.live_background(ident)
+        short_id, state = actions.live_background(ident)
         match body.input.action:
             case "choose":
-                return attacher.choose(short_id, body.input.option, body.input.text)
+                i = body.input
+                return attacher.choose(short_id, Choice(i.option, i.title, i.label, i.text))
             case "key":
                 return attacher.interrupt(short_id)
             case "mode":
+                if state is SessionState.WORKING:
+                    # Cycling may pass through modes that skip prompts; harmless only while idle.
+                    raise ActionError(409, "Chỉ đổi mode khi Claude đang rảnh: "
+                                           "đợi xong lượt này hoặc bấm Esc.")
                 return attacher.set_mode(short_id, body.input.mode)
             case "type":
                 return attacher.type_message(short_id, body.input.text)
@@ -536,7 +546,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     async def m_input(machine: str, ident: str, body: SessionInputBody) -> Response:
         check_id(ident)
         return await on_machine(machine, "POST", f"/api/sessions/{ident}/input",
-                                lambda: send_input(ident, body), body)
+                                lambda: send_input(ident, body), body, timeout=INPUT_TIMEOUT)
 
     @app.post("/api/m/{machine}/sessions/{ident}/{action}", dependencies=[Depends(require_write)])
     async def m_action(machine: str, ident: str, action: str) -> Response:

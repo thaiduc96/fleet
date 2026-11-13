@@ -62,3 +62,7 @@ def test_an_escape_sequence_split_across_reads_still_applies(cut: str) -> None:
     screen.feed(whole[len(cut):])
 
     assert screen.lines()[0] == "a" + " " * 21 + "b"
+
+
+def test_absurdly_long_numbers_in_a_sequence_do_not_crash() -> None:
+    assert render("\x1b[" + "9" * 5000 + "Hok")[-1].endswith("ok")

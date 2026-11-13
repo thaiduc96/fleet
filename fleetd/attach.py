@@ -27,10 +27,11 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Protocol
 
 from fleetd import prompts
-from fleetd.models import Prompt, SessionScreen, SettableMode
+from fleetd.models import Prompt, SessionMode, SessionScreen, SettableMode
 from fleetd.vt import Screen
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,8 @@ ESC = "\x1b"
 SHIFT_TAB = "\x1b[Z"
 ENTER = "\r"
 PASTE_START, PASTE_END = "\x1b[200~", "\x1b[201~"
-CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # keeps \t and \n
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # C0 (but \t, \n), DEL, C1 (\x9b is a CSI)
+LOCK_WAIT_SEC = MAX_SETTLE_SEC * 2
 
 
 class AttachError(Exception):
@@ -74,8 +76,12 @@ class AttachProcess:
                 os.execvp(claude_bin, [claude_bin, "attach", short_id])
             finally:
                 os._exit(127)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         self.pid, self.fd = pid, fd
+        try:
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+        except OSError:
+            self.close()  # never leave the child or the fd behind
+            raise
 
     def read(self, timeout: float) -> bytes:
         ready, _, _ = select.select([self.fd], [], [], timeout)
@@ -111,6 +117,16 @@ OpenTty = Callable[[str], Tty]
 def clean_text(text: str) -> str:
     """Typed text without control characters: it can never turn into ESC, Enter or a shortcut."""
     return CONTROL_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+@dataclass(frozen=True)
+class Choice:
+    """An answer to the menu the user saw: its title and the option's label must still match."""
+
+    option: str
+    title: str
+    label: str
+    text: str | None = None
 
 
 class Terminal:
@@ -160,7 +176,7 @@ class Attacher:
     def _attached(self, short_id: str) -> Iterator[Terminal]:
         with self._guard:
             lock = self._locks.setdefault(short_id, threading.Lock())
-        if not lock.acquire(timeout=MAX_SETTLE_SEC * 3):
+        if not lock.acquire(timeout=LOCK_WAIT_SEC):
             raise AttachError(409, "Đang có thao tác khác trên session này, thử lại sau.")
         try:
             tty = self.open_tty(short_id)
@@ -178,21 +194,27 @@ class Attacher:
         with self._attached(short_id) as term:
             return term.view()
 
-    def choose(self, short_id: str, option: str, text: str | None) -> SessionScreen:
+    def choose(self, short_id: str, choice: Choice) -> SessionScreen:
         with self._attached(short_id) as term:
             prompt = _require_prompt(term.view().prompt)
-            picked = next((o for o in prompt.options if o.key == option), None)
-            if picked is None:
-                raise AttachError(409, f"Lựa chọn {option} không còn trên màn hình.")
-            typed = clean_text(text or "").replace("\n", " ").strip()
+            if prompt.title != choice.title:
+                raise AttachError(409, "Câu hỏi trên màn hình đã đổi; xem lại rồi chọn.")
+            picked = next((o for o in prompt.options if o.key == choice.option), None)
+            if picked is None or picked.label != choice.label:
+                raise AttachError(409, f'Lựa chọn "{choice.label}" không còn ở vị trí {choice.option}; '
+                                       "xem lại rồi chọn.")
+            # Typed, not pasted: a tab or newline would act as a key inside the menu.
+            typed = clean_text(choice.text or "").replace("\n", " ").replace("\t", " ").strip()
             if picked.needs_text and not typed:
                 raise AttachError(400, f'"{picked.label}" cần nội dung.')
-            log.info("session %s: choose %s (%s)", short_id, option, picked.label)
-            term.send(option)
+            if typed and not picked.needs_text:
+                raise AttachError(400, f'"{picked.label}" không nhận nội dung kèm theo.')
+            log.info("session %s: choose %s (%s)", short_id, choice.option, picked.label)
+            term.send(choice.option)
             if typed:
                 term.send(typed)
                 term.send(ENTER)
-            elif _still_asking(term.view().prompt, prompt, option):
+            elif _still_asking(term.view().prompt, prompt, choice.option):
                 term.send(ENTER)  # menus where a digit only moves the highlight
             return term.view()
 
@@ -203,17 +225,27 @@ class Attacher:
             return term.view()
 
     def set_mode(self, short_id: str, mode: SettableMode) -> SessionScreen:
+        """Shift+Tab until the footer shows `mode`; on failure, cycle back to where it started.
+
+        Callers only switch an idle session, so passing through a mode on the way
+        (even one that skips prompts) runs nothing in it. It must never end there.
+        """
         with self._attached(short_id) as term:
             view = term.view()
             if view.prompt is not None:
                 raise AttachError(409, "Session đang chờ trả lời; trả lời trước rồi mới đổi mode.")
-            for _ in range(MAX_MODE_STEPS):
-                if view.mode == mode:
-                    log.info("session %s: mode %s", short_id, mode)
-                    return view
-                term.send(SHIFT_TAB)
-                view = term.view()
-            raise AttachError(409, f"Không chuyển được sang mode {mode} (đang là {view.mode or 'không rõ'}).")
+            start = view.mode
+            if start is None:
+                raise AttachError(409, "Không đọc được mode hiện tại của session.")
+            if _cycle_to(term, mode) is not None:
+                log.info("session %s: mode %s -> %s", short_id, start, mode)
+                return term.view()
+            if _cycle_to(term, start) is None:
+                now = term.view().mode or "không rõ"
+                log.error("session %s: could not restore mode %s (now %s)", short_id, start, now)
+                raise AttachError(500, f"Không chuyển được sang {mode} và không đưa lại được về {start}: "
+                                       f"session đang ở mode {now}. Kiểm tra ngay trong terminal.")
+            raise AttachError(409, f"Không chuyển được sang mode {mode}; đã để lại mode {start}.")
 
     def type_message(self, short_id: str, text: str) -> SessionScreen:
         with self._attached(short_id) as term:
@@ -226,6 +258,17 @@ class Attacher:
             term.send(f"{PASTE_START}{body}{PASTE_END}")  # one paste keeps newlines inside the message
             term.send(ENTER)
             return term.view()
+
+
+def _cycle_to(term: Terminal, target: SessionMode) -> SessionScreen | None:
+    """Press Shift+Tab (at most one full cycle) until the footer shows `target`."""
+    view = term.view()
+    for _ in range(MAX_MODE_STEPS):
+        if view.mode == target:
+            return view
+        term.send(SHIFT_TAB)
+        view = term.view()
+    return view if view.mode == target else None
 
 
 def _require_prompt(prompt: Prompt | None) -> Prompt:

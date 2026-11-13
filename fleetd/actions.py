@@ -107,8 +107,8 @@ class Actions:
         out = self._call("rm", ident, self.cli.remove, check_id(ident))
         return ActionResult(action="rm", id=ident, output=out)
 
-    def live_background(self, ident: str) -> str:
-        """Short id of a running background session: the only kind `claude attach` can drive."""
+    def live_background(self, ident: str) -> tuple[str, SessionState]:
+        """Short id and state of a running background session: the only kind `claude attach` can drive."""
         check_id(ident)
         try:
             agents = self.cli.agents(max_age=0)
@@ -120,7 +120,7 @@ class Actions:
         if entry.get("kind") != "background":
             raise ActionError(409, "Session đang mở trong terminal; hãy trả lời ở đó "
                                    "hoặc qua Remote Control (claude.ai/code).")
-        return str(entry["id"])
+        return str(entry["id"]), normalize_state(entry)
 
     def start(self, body: NewSessionBody) -> ActionResult:
         cwd = safe_dir(body.cwd, self.home)

@@ -61,7 +61,7 @@ type SettableMode = "manual" | "auto" | "acceptEdits" | "plan";
 /** What the session's terminal shows (fleetd attaches to it). */
 interface SessionScreen { text: string; mode: SessionMode | null; prompt: SessionPrompt | null }
 type SessionInput =
-  | { action: "choose"; option: string; text?: string }
+  | { action: "choose"; option: string; title: string; label: string; text?: string }
   | { action: "key"; key: "esc" }
   | { action: "mode"; mode: SettableMode }
   | { action: "type"; text: string };
@@ -1081,8 +1081,9 @@ async function sendInput(s: Row, input: SessionInput, done: string): Promise<boo
 }
 
 async function typeInto(s: Row, text: string): Promise<ActionResult> {
+  const cur = live;  // the drawer may switch sessions while this is in flight
   const v = parseScreen(await send("POST", inputPath(s), { input: { action: "type", text } }));
-  if (live) { live.screen = v; live.screenAt = Date.now(); }
+  if (cur && live === cur) { cur.screen = v; cur.screenAt = Date.now(); }
   return { id: s.id, action: "type", output: "" };
 }
 
@@ -1106,7 +1107,8 @@ function buildPromptCard(p: SessionPrompt, s: Row): HTMLElement {
   sendBtn.addEventListener("click", () => {
     const text = feedback.value.trim();
     if (!chosen || !text) { feedback.focus(); return; }
-    void sendInput(s, { action: "choose", option: chosen.key, text }, `Đã gửi: ${chosen.label}`);
+    void sendInput(s, { action: "choose", option: chosen.key, title: p.title, label: chosen.label, text },
+      `Đã gửi: ${chosen.label}`);
   });
   const options = p.options.map((o) => h("button", {
     type: "button", class: `prompt-option${o.selected ? " selected" : ""}`,
@@ -1115,7 +1117,7 @@ function buildPromptCard(p: SessionPrompt, s: Row): HTMLElement {
         chosen = o; textBox.hidden = false; sendBtn.textContent = `Gửi · ${o.label}`; feedback.focus();
         return;
       }
-      void sendInput(s, { action: "choose", option: o.key }, `Đã chọn: ${o.label}`);
+      void sendInput(s, { action: "choose", option: o.key, title: p.title, label: o.label }, `Đã chọn: ${o.label}`);
     },
   }, h("span", { class: "key" }, o.key), h("span", { class: "label" }, o.label),
   o.detail ? h("span", { class: "detail" }, o.detail) : null));
@@ -1143,8 +1145,10 @@ function renderControl(): void {
       menuOpen ? "Trả lời câu hỏi trước" : live?.screenError ? "Không rõ" : "Đang đọc mode…") : null,
     mode !== null && !SETTABLE_MODES.some((m) => m === mode) ? h("option", { value: mode, selected: true, disabled: true }, MODE_LABEL[mode]) : null,
     SETTABLE_MODES.map((m) => h("option", { value: m, selected: m === mode }, MODE_LABEL[m])));
-  sel.disabled = menuOpen || mode === null;
-  sel.title = menuOpen ? "Trả lời câu hỏi đang chờ trước, rồi mới đổi mode" : "Như Shift+Tab trong terminal";
+  const working = s.state === "working";
+  sel.disabled = menuOpen || working || mode === null;
+  sel.title = menuOpen ? "Trả lời câu hỏi đang chờ trước, rồi mới đổi mode"
+    : working ? "Chỉ đổi mode khi Claude đang rảnh: đợi xong hoặc bấm Esc" : "Như Shift+Tab trong terminal";
   sel.addEventListener("change", () => {
     const target = SETTABLE_MODES.find((m) => m === sel.value);
     if (target) void sendInput(s, { action: "mode", mode: target }, `Đã chuyển sang ${MODE_LABEL[target]}`);

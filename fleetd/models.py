@@ -392,8 +392,12 @@ class SessionScreen(ApiModel):
 
 
 class ChooseInput(ApiModel):
+    """An answer names the menu it was meant for, so a menu that changed meanwhile is never answered."""
+
     action: Literal["choose"]
     option: str = Field(pattern=r"^[1-9]$")
+    title: str = Field(max_length=2000)
+    label: str = Field(min_length=1, max_length=2000)
     text: str | None = Field(default=None, max_length=4000)
 
 

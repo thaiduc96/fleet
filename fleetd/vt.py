@@ -18,6 +18,7 @@ ESC_OTHER_RE = re.compile(r"\x1b([@-Z\\-_]|[()][0-9A-Za-z])")
 # An escape sequence cut off by the end of a read: kept until the next read completes it.
 INCOMPLETE_RE = re.compile(r"\x1b(\[[0-?]*[ -/]*|\][^\x07\x1b]*|[()])?\Z")
 TAB = 8
+MAX_PARAM_DIGITS = 6
 Row = list[str | None]  # None: right half of a wide character
 ALT_SCREEN_MODES = ("1049", "47", "1047")
 
@@ -141,7 +142,9 @@ class Screen:
         return i + 1  # unknown ESC: drop it
 
     def _csi(self, private: str, raw: str, final: str) -> None:
-        params = [int(p) if p.isdigit() else 0 for p in raw.replace(":", ";").split(";")] if raw else []
+        # Clamped: a hostile "ESC[999…9H" must not hit Python's int-conversion limit.
+        fields = raw.replace(":", ";").split(";") if raw else []
+        params = [int(p[:MAX_PARAM_DIGITS]) if p.isdigit() else 0 for p in fields]
 
         def arg(k: int = 0, default: int = 1) -> int:
             return params[k] if len(params) > k and params[k] else default
