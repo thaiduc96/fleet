@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, TypeVar
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -66,7 +67,8 @@ from fleetd.peers import (
     response_detail,
 )
 from fleetd.state import StateFile
-from fleetd.transcripts import TranscriptIndex, messages
+from fleetd.transcripts import TranscriptIndex, conversation
+from fleetd.transcripts import version as transcript_version
 from fleetd.uploads import MAX_UPLOAD_BYTES, Uploads
 
 M = TypeVar("M", bound=BaseModel)
@@ -196,12 +198,17 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     def local_snap() -> MachineSnapshot:
         return snapshot.build(cfg, cli, idx, rt.claude_version, current_health(), identity())
 
-    def read_transcript(session_id: str, limit: int) -> Transcript:
+    def read_transcript(session_id: str, limit: int, since: str | None = None) -> Transcript:
         path = idx.find(session_id)
         if not path:
             raise HTTPException(404, "transcript not found")
-        return Transcript(session_id=session_id, summary=idx.summary(path),
-                          messages=messages(path, limit=max(1, min(limit, 400))))
+        current = transcript_version(path)
+        if since == current:  # the dashboard polls; most polls change nothing
+            return Transcript(session_id=session_id, summary=idx.summary(path), messages=[],
+                              version=current, unchanged=True)
+        conv = conversation(path, limit=max(1, min(limit, 400)))
+        return Transcript(session_id=session_id, summary=idx.summary(path), messages=conv.messages,
+                          version=current, model=conv.model, context_tokens=conv.context_tokens)
 
     def read_logs(ident: str) -> Logs:
         if not ID_RE.fullmatch(ident):
@@ -305,8 +312,8 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return relay(machine, r)
 
     @app.get("/api/sessions/{session_id}/transcript", dependencies=[Depends(require)])
-    def transcript(session_id: str, limit: int = 60) -> Transcript:
-        return read_transcript(session_id, limit)
+    def transcript(session_id: str, limit: int = 60, since: str | None = None) -> Transcript:
+        return read_transcript(session_id, limit, since)
 
     @app.get("/api/sessions/{ident}/logs", dependencies=[Depends(require)])
     def logs(ident: str) -> Logs:
@@ -319,19 +326,21 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         return Fleet(self_machine=cfg.machine, machines=[mine, *others])
 
     @app.get("/api/m/{machine}/sessions/{ident}/{what}", dependencies=[Depends(require)])
-    async def per_machine(machine: str, ident: str, what: str, limit: int = 60) -> Response:
+    async def per_machine(machine: str, ident: str, what: str, limit: int = 60,
+                          since: str | None = None) -> Response:
         """Read-only proxy so the dashboard talks to one origin only."""
         if what not in ("transcript", "logs") or not ID_RE.fullmatch(ident):
             raise HTTPException(404)
         if machine == cfg.machine:
             if what == "transcript":
-                body = await asyncio.to_thread(read_transcript, ident, limit)
+                body = await asyncio.to_thread(read_transcript, ident, limit, since)
             else:
                 body = await asyncio.to_thread(read_logs, ident)
             return Response(body.model_dump_json(), media_type="application/json")
         if machine not in peers().peers:
             raise HTTPException(404, f"unknown machine {machine}")
-        path = f"/api/sessions/{ident}/{what}" + (f"?limit={limit}" if what == "transcript" else "")
+        query = urlencode({"limit": limit, **({"since": since} if since else {})})
+        path = f"/api/sessions/{ident}/{what}" + (f"?{query}" if what == "transcript" else "")
         try:
             r = await peers().get(machine, path)
         except httpx.HTTPError as e:

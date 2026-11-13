@@ -185,17 +185,51 @@ class Block(ApiModel):
     rows: list[list[list[Inline]]] = []   # table
 
 
+class Question(ApiModel):
+    """One question Claude asked with AskUserQuestion."""
+
+    question: str
+    header: str | None = None
+    options: list[str] = []
+
+
+TodoStatus = Literal["pending", "in_progress", "completed"]
+
+
+class Todo(ApiModel):
+    content: str
+    status: TodoStatus = "pending"
+
+
+class ToolCall(ApiModel):
+    """What a tool call did, for the expandable line in the conversation."""
+
+    name: str
+    detail: str | None = None        # command, diff, file content… (clipped)
+    result: str | None = None        # the tool's output (clipped); None while it is still running
+    is_error: bool = False
+    questions: list[Question] = []   # AskUserQuestion
+    todos: list[Todo] = []           # TodoWrite
+    plan: list[Block] | None = None  # ExitPlanMode: the plan as Markdown
+
+
 class Message(ApiModel):
     role: str  # "user" | "assistant" | "tool"
-    text: str
+    text: str  # tool: the one-line title (older dashboards show only this)
     ts: str | None = None
+    id: str | None = None              # stable across reads: record uuid + block index
     blocks: list[Block] | None = None  # assistant replies: parsed Markdown; None for plain text
+    tool: ToolCall | None = None       # role "tool" only
 
 
 class Transcript(ApiModel):
     session_id: str
     summary: TranscriptSummary
     messages: list[Message]
+    version: str = ""        # changes whenever the transcript file does; pass back as ?since=
+    unchanged: bool = False  # ?since= matched: messages is empty, keep what you have
+    model: str | None = None
+    context_tokens: int | None = None  # prompt size of the latest reply (input + cache)
 
 
 class Session(ApiModel):

@@ -44,7 +44,16 @@ type Block =
   | { type: "quote"; children: Block[] }
   | { type: "table"; align: Align[]; header: Inline[][]; rows: Inline[][][] }
   | { type: "rule" };
-interface Message { role: Role; text: string; ts: string | null; blocks: Block[] | null }
+interface Question { question: string; header: string | null; options: string[] }
+type TodoStatus = "pending" | "in_progress" | "completed";
+interface Todo { content: string; status: TodoStatus }
+/** A tool call as Claude Code's terminal shows it; result is null while the tool still runs. */
+interface ToolCall {
+  name: string; detail: string | null; result: string | null; isError: boolean;
+  questions: Question[]; todos: Todo[]; plan: Block[] | null;
+}
+interface Message { id: string | null; role: Role; text: string; ts: string | null; blocks: Block[] | null; tool: ToolCall | null }
+interface Transcript { version: string; unchanged: boolean; model: string | null; contextTokens: number | null; messages: Message[] }
 interface ActionResult { id: string | null; action: string; output: string }
 
 /** A session as shown in the list: plus which machine it belongs to. */
@@ -161,13 +170,40 @@ function parseBlocks(v: unknown): Block[] {
   });
 }
 
+const parseTodoStatus = (v: unknown): TodoStatus => (v === "in_progress" || v === "completed" ? v : "pending");
+
+function parseTool(v: unknown): ToolCall | null {
+  if (!isObj(v)) return null;
+  return {
+    name: str(v.name) ?? "tool", detail: str(v.detail), result: str(v.result), isError: bool(v.isError),
+    questions: list(v.questions).flatMap((q) => {
+      const o = obj(q);
+      const question = str(o.question);
+      return question ? [{ question, header: str(o.header), options: list(o.options).flatMap((x) => str(x) ?? []) }] : [];
+    }),
+    todos: list(v.todos).flatMap((t) => {
+      const o = obj(t);
+      const content = str(o.content);
+      return content ? [{ content, status: parseTodoStatus(o.status) }] : [];
+    }),
+    plan: Array.isArray(v.plan) ? parseBlocks(v.plan) : null,
+  };
+}
+
 function parseMessages(v: unknown): Message[] {
   return list(obj(v).messages).flatMap((m) => {
     const o = obj(m);
     const text = str(o.text);
     const blocks = Array.isArray(o.blocks) ? parseBlocks(o.blocks) : null;
-    return isRole(o.role) && text !== null ? [{ role: o.role, text, ts: str(o.ts), blocks }] : [];
+    return isRole(o.role) && text !== null
+      ? [{ id: str(o.id), role: o.role, text, ts: str(o.ts), blocks, tool: parseTool(o.tool) }] : [];
   });
+}
+
+function parseTranscript(v: unknown): Transcript {
+  const o = obj(v);
+  return { version: str(o.version) ?? "", unchanged: bool(o.unchanged), model: str(o.model),
+    contextTokens: num(o.contextTokens), messages: parseMessages(v) };
 }
 
 function parseAction(v: unknown): ActionResult {
@@ -559,8 +595,14 @@ function render(): void {
   el("groups", HTMLElement).replaceChildren(...(sections.length ? sections : [h("p", { class: "empty" }, "Không có session nào.")]));
   if (drawer) {
     const cur = drawer;
-    const fresh = all.find((s) => s.machine === cur.row.machine && s.id === cur.row.id);
-    if (fresh) { cur.row = fresh; renderDrawerHead(); }
+    const fresh = all.find((s) => s.machine === cur.row.machine && s.id === cur.row.id)
+      ?? all.find((s) => s.machine === cur.row.machine && cur.row.sessionId != null && s.sessionId === cur.row.sessionId);
+    if (fresh) {
+      const stateChanged = fresh.state !== cur.row.state;
+      cur.row = fresh;
+      renderDrawerHead();
+      if (stateChanged && live?.loaded && cur.tab === "transcript") renderConversation(live, false);  // the "working" line
+    }
   }
 }
 
@@ -621,7 +663,10 @@ function renderDrawerHead(): void {
   const s = drawer.row;
   el("d-title", HTMLHeadingElement).textContent = s.name ?? s.id;
   el("d-meta", HTMLDivElement).textContent = [s.mlabel, STATE_LABEL[s.state], shortPath(s.cwd),
-    s.costUSD != null ? `$${s.costUSD.toFixed(2)}` : null, ago(s.updatedAt ?? s.startedAt)]
+    s.costUSD != null ? `$${s.costUSD.toFixed(2)}` : null,
+    live?.model ? live.model.replace(/^claude-/, "") : null,
+    live?.contextTokens ? `${Math.round(live.contextTokens / 1000)}k token context` : null,
+    ago(s.updatedAt ?? s.startedAt)]
     .filter(Boolean).join(" · ");
   const acts: Node[] = [...actionButtons(s)];
   if (s.kind === "background") acts.push(copyBtn("Copy attach", `claude attach ${s.id}`));
@@ -676,41 +721,182 @@ function renderBlocks(blocks: Block[]): Node[] {
   return blocks.map(renderBlock);
 }
 
+const TODO_MARK: Record<TodoStatus, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
+const DIFF_TOOLS: ReadonlySet<string> = new Set(["Edit", "MultiEdit"]);
+
+/** Edit diffs: "- " lines red, "+ " lines green, like the terminal. */
+function detailNode(t: ToolCall): HTMLPreElement | null {
+  if (!t.detail) return null;
+  if (!DIFF_TOOLS.has(t.name)) return h("pre", { class: "tool-detail" }, t.detail);
+  return h("pre", { class: "tool-detail" }, t.detail.split("\n").map((line) => h("span", {
+    class: line.startsWith("+ ") ? "add" : line.startsWith("- ") ? "del" : null,
+  }, `${line}\n`)));
+}
+
+function toolNode(m: Message): HTMLDivElement {
+  const t = m.tool;
+  if (!t) return h("div", { class: "msg tool" }, `→ ${m.text}`);
+  const mark = t.result === null ? " …" : t.isError ? " ✗" : "";
+  const always: Node[] = [];
+  if (t.questions.length) {
+    always.push(h("div", { class: "tool-questions" }, t.questions.map((q) => h("div", {},
+      h("strong", {}, q.question), q.options.length ? h("ul", {}, q.options.map((o) => h("li", {}, o))) : null))));
+  }
+  if (t.todos.length) always.push(h("ul", { class: "todos" }, t.todos.map((td) => h("li", { class: td.status }, `${TODO_MARK[td.status]} ${td.content}`))));
+  if (t.plan?.length) always.push(h("div", { class: "plan md" }, renderBlocks(t.plan)));
+  const output = t.result === null ? h("p", { class: "muted" }, "đang chạy…")
+    : h("pre", { class: `tool-result${t.isError ? " error" : ""}` }, t.result || "(không có output)");
+  return h("div", { class: `msg tool${t.isError ? " error" : ""}` },
+    h("details", {}, h("summary", {}, `→ ${m.text}${mark}`), detailNode(t), output), always);
+}
+
 function messageNode(m: Message): HTMLDivElement {
-  if (m.role === "tool") return h("div", { class: "msg tool" }, `→ ${m.text}`);
+  if (m.role === "tool") return toolNode(m);
   const who = h("div", { class: "who" }, `${ROLE_LABEL[m.role]} · ${ago(m.ts)}`);
   // Old fleetd peers send no blocks: keep their plain text.
   if (m.blocks && m.blocks.length) return h("div", { class: `msg ${m.role} md` }, who, renderBlocks(m.blocks));
   return h("div", { class: `msg ${m.role}` }, who, m.text);
 }
 
+// ---------------------------------------------------------------- live drawer
+// The open tab polls its machine: fast while Claude works or a sent message has not
+// shown up yet, slower otherwise. Transcript polls send ?since=<version>, so an
+// unchanged transcript costs fleetd one stat. Only changed messages are rebuilt,
+// so open tool details and the scroll position survive.
+const LIVE_FAST_MS = 1500;
+const LIVE_SLOW_MS = 4000;
+const PENDING_TTL_MS = 3 * 60 * 1000;
+const TRANSCRIPT_LIMIT = 200;
+const NEAR_BOTTOM_PX = 80;
+
+/** A message sent from here that the transcript does not show yet. */
+interface Pending { text: string; at: number; seen: number }
+interface Live {
+  key: string; version: string; timer: number; busy: boolean; loaded: boolean;
+  messages: Message[]; nodes: Map<string, { sig: string; node: HTMLElement }>;
+  pending: Pending[]; model: string | null; contextTokens: number | null; logs: string | null;
+}
+let live: Live | null = null;
+
+const liveKey = (s: Row, tab: Tab): string => `${s.machine}/${s.sessionId ?? s.id}/${tab}`;
+const sameText = (a: string, b: string): boolean => a.trim().startsWith(b.trim().slice(0, 200));
+const userCopies = (msgs: Message[], text: string): number => msgs.filter((m) => m.role === "user" && sameText(m.text, text)).length;
+
+function stopLive(): void {
+  if (live) clearTimeout(live.timer);
+  live = null;
+}
+
+/** Open (or force-refresh) the drawer's current tab. */
 async function loadTab(): Promise<void> {
   if (!drawer) return;
-  const { row: s, tab } = drawer;
-  const body = el("d-body", HTMLDivElement);
-  body.replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
-  try {
-    switch (tab) {
-      case "logs": {
-        const d = obj(await api(`${mpath(s.machine)}/${encodeURIComponent(s.id)}/logs`));
-        body.replaceChildren(h("pre", { class: "logs" }, str(d.logs) || "(trống)"));
-        break;
-      }
-      case "transcript": {
-        if (!s.sessionId) { body.replaceChildren(h("p", { class: "muted" }, "Không có transcript.")); return; }
-        const msgs = parseMessages(await api(`${mpath(s.machine)}/${encodeURIComponent(s.sessionId)}/transcript?limit=120`));
-        body.replaceChildren(...(msgs.length ? msgs.map(messageNode) : [h("p", { class: "muted" }, "Chưa có tin nhắn.")]));
-        break;
-      }
-      default: {
-        const never: never = tab;
-        throw new Error(`unknown tab ${String(never)}`);
-      }
-    }
-    body.scrollTop = body.scrollHeight;
-  } catch (e) {
-    if (!(e instanceof Unauthorized)) body.replaceChildren(h("p", { class: "error" }, `Không tải được: ${String(e)}`));
+  const key = liveKey(drawer.row, drawer.tab);
+  if (live?.key !== key) {
+    stopLive();
+    live = { key, version: "", timer: 0, busy: false, loaded: false, messages: [], nodes: new Map(),
+      pending: [], model: null, contextTokens: null, logs: null };
+    el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "muted" }, "Đang tải…"));
+  } else {
+    live.version = "";
   }
+  await pollLive();
+}
+
+async function pollLive(): Promise<void> {
+  const cur = live;
+  if (!cur || !drawer) return;
+  clearTimeout(cur.timer);
+  if (!document.hidden && !cur.busy) {
+    cur.busy = true;
+    try {
+      if (drawer.tab === "logs") await pollLogs(cur, drawer.row);
+      else await pollTranscript(cur, drawer.row);
+    } catch (e) {
+      if (!(e instanceof Unauthorized) && live === cur && !cur.loaded) {
+        el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "error" }, `Không tải được: ${String(e)}`));
+      }
+    } finally {
+      cur.busy = false;
+    }
+  }
+  if (live !== cur) return;
+  const fast = drawer?.row.state === "working" || cur.pending.length > 0;
+  cur.timer = window.setTimeout(() => { void pollLive(); }, fast ? LIVE_FAST_MS : LIVE_SLOW_MS);
+}
+
+/** Run `update`, then stay pinned to the bottom if the reader was there; else keep their place. */
+function keepScroll(update: () => void, toBottom: boolean): void {
+  const body = el("d-body", HTMLDivElement);
+  const atBottom = toBottom || body.scrollHeight - body.scrollTop - body.clientHeight < NEAR_BOTTOM_PX;
+  const top = body.scrollTop;
+  update();
+  body.scrollTop = atBottom ? body.scrollHeight : top;
+}
+
+async function pollLogs(cur: Live, s: Row): Promise<void> {
+  const d = obj(await api(`${mpath(s.machine)}/${encodeURIComponent(s.id)}/logs`));
+  const logs = str(d.logs) || "(trống)";
+  if (live !== cur || logs === cur.logs) return;
+  const first = !cur.loaded;
+  cur.logs = logs; cur.loaded = true;
+  keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(h("pre", { class: "logs" }, logs)), first);
+}
+
+async function pollTranscript(cur: Live, s: Row): Promise<void> {
+  if (!s.sessionId) {
+    cur.loaded = true;
+    el("d-body", HTMLDivElement).replaceChildren(h("p", { class: "muted" }, "Không có transcript."));
+    return;
+  }
+  const q = new URLSearchParams({ limit: String(TRANSCRIPT_LIMIT) });
+  if (cur.version) q.set("since", cur.version);
+  const t = parseTranscript(await api(`${mpath(s.machine)}/${encodeURIComponent(s.sessionId)}/transcript?${q.toString()}`));
+  if (live !== cur) return;
+  if (!t.unchanged) {
+    cur.version = t.version; cur.messages = t.messages;
+    cur.model = t.model ?? cur.model; cur.contextTokens = t.contextTokens ?? cur.contextTokens;
+  }
+  const first = !cur.loaded;
+  cur.loaded = true;
+  renderConversation(cur, first);
+  if (first || !t.unchanged) renderDrawerHead();
+  // The session's state (working → done) lives in the fleet list, polled every REFRESH_MS.
+  // Claude's daemon flips it a few seconds after the last reply, so while someone watches
+  // a working session, follow it at the drawer's pace instead.
+  if (!first && (!t.unchanged || s.state === "working")) void refresh();
+}
+
+/** The "Claude is working" line: which tool runs right now, if any. */
+function workingNode(msgs: Message[]): HTMLDivElement | null {
+  if (drawer?.row.state !== "working") return null;
+  const last = msgs[msgs.length - 1];
+  const doing = last?.role === "tool" && last.tool?.result === null ? `đang chạy ${last.text}` : "đang làm việc";
+  return h("div", { class: "msg working", "aria-live": "polite" }, h("span", { class: "dots" }), `Claude ${doing}…`);
+}
+
+function renderConversation(cur: Live, toBottom: boolean): void {
+  const msgs = cur.messages;
+  const now = Date.now();
+  cur.pending = cur.pending.filter((p) => now - p.at < PENDING_TTL_MS && userCopies(msgs, p.text) <= p.seen);
+  const next = new Map<string, { sig: string; node: HTMLElement }>();
+  const nodes: Node[] = msgs.map((m, k) => {
+    const id = m.id ?? `i${k}`;
+    const sig = JSON.stringify(m);
+    const old = cur.nodes.get(id);
+    const node = old?.sig === sig ? old.node : messageNode(m);
+    if (old && old.node !== node && old.node.querySelector("details")?.open) {
+      node.querySelector("details")?.setAttribute("open", "");
+    }
+    next.set(id, { sig, node });
+    return node;
+  });
+  cur.nodes = next;
+  nodes.push(...cur.pending.map((p) => h("div", { class: "msg user pending" },
+    h("div", { class: "who" }, `${ROLE_LABEL.user} · đã gửi, chờ Claude nhận…`), p.text)));
+  const working = workingNode(msgs);
+  if (working) nodes.push(working);
+  if (!nodes.length) nodes.push(h("p", { class: "muted" }, "Chưa có tin nhắn."));
+  keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(...nodes), toBottom);
 }
 
 function openDrawer(row: Row): void {
@@ -719,7 +905,7 @@ function openDrawer(row: Row): void {
   renderDrawerHead();
   void loadTab();
 }
-function closeDrawer(): void { drawer = null; messageFiles?.clear(); el("drawer", HTMLDivElement).hidden = true; }
+function closeDrawer(): void { drawer = null; stopLive(); messageFiles?.clear(); el("drawer", HTMLDivElement).hidden = true; }
 
 async function sendMessage(e: Event): Promise<void> {
   e.preventDefault();
@@ -732,15 +918,26 @@ async function sendMessage(e: Event): Promise<void> {
   const note = el("d-compose-note", HTMLSpanElement);
   const noteText = note.textContent;
   if (submit instanceof HTMLButtonElement) submit.disabled = true;
+  // Show the message at once, as a terminal would; stopping/resuming the session takes seconds.
+  const typed = text.value;
+  const shownIn = live && drawer.tab === "transcript" ? live : null;
+  const bubble: Pending = { text: typed, at: Date.now(), seen: shownIn ? userCopies(shownIn.messages, typed) : 0 };
+  if (shownIn) { shownIn.pending.push(bubble); renderConversation(shownIn, true); }
   try {
     const paths = await messageFiles?.upload(s.machine) ?? [];
     const r = await write("POST", `${mpath(s.machine)}/${encodeURIComponent(target)}/message`,
-      { text: withPaths(text.value, paths), force: force.checked });
+      { text: withPaths(typed, paths), force: force.checked });
     text.value = ""; force.checked = false; messageFiles?.clear();
+    // A resume can give the job a new short id; keep the drawer on it.
+    if (drawer?.row === s && r.id && r.id !== s.id) drawer.row = { ...s, id: r.id };
     toast(`Đã gửi tới ${r.id ?? s.id}`);
     await refresh();
-    void loadTab();
+    void pollLive();
   } catch (err) {
+    if (shownIn) {
+      shownIn.pending = shownIn.pending.filter((p) => p !== bubble);
+      if (live === shownIn) renderConversation(shownIn, false);
+    }
     if (!(err instanceof Unauthorized)) toast(`Gửi lỗi: ${err instanceof Error ? err.message : String(err)}`, true);
   } finally {
     note.textContent = noteText;
@@ -938,7 +1135,11 @@ function wire(): void {
     else if (!el("modal", HTMLDivElement).hidden) el("modal", HTMLDivElement).hidden = true;
     else if (drawer) closeDrawer();
   });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && timer) void refresh(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !timer) return;
+    void refresh();
+    void pollLive();  // back from the background (iPhone): catch up at once
+  });
 }
 
 wire();
