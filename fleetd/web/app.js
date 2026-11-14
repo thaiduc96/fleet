@@ -67,7 +67,7 @@ function parseMachine(v) {
         error: str(o.error),
     };
 }
-const parseFleet = (v) => ({ machines: list(obj(v).machines).map(parseMachine) });
+const parseFleet = (v) => ({ machines: list(obj(v).machines).map(parseMachine), webVersion: str(obj(v).webVersion) ?? "" });
 const SAFE_HREF = /^(https?:|mailto:)/i;
 function parseInlines(v) {
     return list(v).flatMap((x) => {
@@ -285,6 +285,7 @@ class Attachments {
         this.render();
     }
     clear() { this.files = []; this.picker.value = ""; this.render(); }
+    get isEmpty() { return !this.files.length; }
     /** Upload every file to `machine`; returns their saved paths, or throws naming the file that failed. */
     async upload(machine) {
         const paths = [];
@@ -436,6 +437,7 @@ function focusFromHash(f) {
 async function refresh() {
     try {
         const f = parseFleet(await api("/api/fleet"));
+        reloadIfOutdated(f.webVersion);
         fleet = f;
         notifyChanges(f);
         render();
@@ -446,6 +448,33 @@ async function refresh() {
         if (!(e instanceof Unauthorized))
             el("updated", HTMLSpanElement).textContent = `lỗi: ${String(e)}`;
     }
+}
+// ---------------------------------------------------------------- reload after an update
+// fleetd serves a new page after an update, but an open tab, and above all the iPhone
+// app (iOS keeps it in memory for days), keeps running the old script. Reload as soon as
+// nothing typed would be lost; until then each poll tries again.
+const PAGE_VERSION = document.querySelector('meta[name="fleet-web-version"]')?.content ?? "";
+const RELOADED_FOR_KEY = "fleet.reloadedFor";
+function reloadIfOutdated(serverVersion) {
+    if (!PAGE_VERSION || !serverVersion || serverVersion === PAGE_VERSION)
+        return;
+    // Already reloaded for this version and still different (a proxy serving an old page): stop, never loop.
+    if (store.get(RELOADED_FOR_KEY, "") === serverVersion)
+        return;
+    if (hasUnsavedInput())
+        return;
+    store.set(RELOADED_FOR_KEY, serverVersion);
+    // Reopen the session being read after the reload (focusFromHash consumes this).
+    const open = drawer?.row;
+    if (open)
+        history.replaceState(null, "", `#s=${encodeURIComponent(open.machine)}/${encodeURIComponent(open.id)}`);
+    location.reload();
+}
+function hasUnsavedInput() {
+    const dialogOpen = !el("modal", HTMLDivElement).hidden || !el("handoff", HTMLDivElement).hidden;
+    const draft = el("d-text", HTMLTextAreaElement).value.trim() !== "";
+    const files = !(messageFiles?.isEmpty ?? true) || !(sessionFiles?.isEmpty ?? true);
+    return dialogOpen || draft || files;
 }
 // ---------------------------------------------------------------- render: list
 const AWAKE_LABEL = { off: "Tắt", ac: "Khi cắm sạc", always: "Luôn luôn" };

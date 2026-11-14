@@ -331,6 +331,7 @@ class MachineSnapshot(ApiModel):
 class Fleet(ApiModel):
     self_machine: str
     machines: list[MachineSnapshot]
+    web_version: str  # of the dashboard this fleetd serves; a page with another one reloads
 
 
 class HealthResponse(Health):

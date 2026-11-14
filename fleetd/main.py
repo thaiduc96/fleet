@@ -88,8 +88,21 @@ SCREEN_TIMEOUT = 30.0  # a peer attaches to the session and waits for the TUI to
 INPUT_TIMEOUT = 180.0  # worst case: waiting for the session lock, then two full mode cycles
 
 
+WEB_VERSION_META = '<meta name="fleet-web-version" content="">'
+
+
+def web_version(web_dir: Path) -> str:
+    """Hash of everything the dashboard is made of; /api/fleet reports it so an open
+    page (the iPhone app stays in memory for days) notices an update and reloads."""
+    digest = hashlib.sha256()
+    for name in ("index.html", *VERSIONED_ASSETS):
+        digest.update((web_dir / name).read_bytes())
+    return digest.hexdigest()[:12]
+
+
 def versioned_index(web_dir: Path) -> str:
-    """index.html with ?v=<content hash> on its script and stylesheet.
+    """index.html with ?v=<content hash> on its script and stylesheet, and the
+    page's web_version in its fleet-web-version meta tag.
 
     After an update the URL changes, so a browser can never pair the new page
     with an app.js it cached heuristically before (1.1.0: the 📎 button showed
@@ -99,7 +112,7 @@ def versioned_index(web_dir: Path) -> str:
     for name in VERSIONED_ASSETS:
         digest = hashlib.sha256((web_dir / name).read_bytes()).hexdigest()[:8]
         html = html.replace(f'/static/{name}"', f'/static/{name}?v={digest}"')
-    return html
+    return html.replace(WEB_VERSION_META, f'<meta name="fleet-web-version" content="{web_version(web_dir)}">')
 
 
 class RevalidatedStaticFiles(StaticFiles):
@@ -156,6 +169,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     keep = KeepAwake(state, default_mode, spawn=spawn)
     uploads = Uploads(cfg.home / "uploads", now=wall_clock)
     rt = Runtime()
+    page_version = web_version(WEB_DIR)  # assets do not change while fleetd runs
 
     def my_label() -> str:
         value = state.get("label")
@@ -367,7 +381,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     @app.get("/api/fleet", dependencies=[Depends(require)])
     async def fleet() -> Fleet:
         mine, others = await asyncio.gather(asyncio.to_thread(local_snap), peers().all())
-        return Fleet(self_machine=cfg.machine, machines=[mine, *others])
+        return Fleet(self_machine=cfg.machine, machines=[mine, *others], web_version=page_version)
 
     @app.get("/api/m/{machine}/sessions/{ident}/{what}", dependencies=[Depends(require)])
     async def per_machine(machine: str, ident: str, what: str, limit: int = 60,

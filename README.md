@@ -98,7 +98,7 @@ Fleet opens a short setup:
 The new machine introduces itself and learns about every other machine; the rest of the fleet learns about it within seconds.
 
 ### Your phone
-Install Tailscale on the phone and open `https://<your-mac>.<tailnet>.ts.net` in Safari. Choose *Share → Add to Home Screen*: Fleet installs as a web app with its own icon that opens full screen, without Safari's toolbars, and always runs the dashboard version of the Mac it points at. Sign in once inside the installed app with the fleet token (it keeps its own storage, separate from Safari).
+Install Tailscale on the phone and open `https://<your-mac>.<tailnet>.ts.net` in Safari. Choose *Share → Add to Home Screen*: Fleet installs as a web app with its own icon that opens full screen, without Safari's toolbars, and always runs the dashboard version of the Mac it points at: after an update an open dashboard reloads itself as soon as nothing you typed would be lost. Sign in once inside the installed app with the fleet token (it keeps its own storage, separate from Safari).
 
 ### Coming from the script install
 Earlier versions were installed with `install.sh` and `bin/fleet`. Just run the installer above: Fleet.app reuses `~/.fleet`, the token in the Keychain, your machines and keep-awake settings, and `tailscale serve`. It replaces the old `com.fleet.fleetd` LaunchAgent only after its own fleetd is confirmed running, and restores it otherwise.
