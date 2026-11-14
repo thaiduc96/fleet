@@ -73,7 +73,14 @@
   <form id="new-form" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="n-title">
     <header><h2 id="n-title">Session mới</h2><button type="button" id="n-close" class="ghost icon-close" aria-label="Đóng">✕</button></header>
     <label>Máy <select id="n-machine" required></select></label>
-    <label>Thư mục <input id="n-cwd" list="n-cwds" placeholder="~/Documents/code/…" required autocomplete="off"></label>
+    <div class="field">
+      <label for="n-cwd">Thư mục</label>
+      <div class="cwd-row">
+        <input id="n-cwd" list="n-cwds" placeholder="~/Documents/code/…" required autocomplete="off">
+        <button type="button" id="n-browse" aria-expanded="false" aria-controls="n-browser">📁 Chọn…</button>
+      </div>
+      <div id="n-browser" class="folder-browser" hidden></div>
+    </div>
     <datalist id="n-cwds"></datalist>
     <div class="grid2">
       <label>Tên (tuỳ chọn) <input id="n-name" maxlength="80"></label>

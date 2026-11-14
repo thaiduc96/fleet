@@ -428,6 +428,15 @@ class Upload(ApiModel):
     size: int
 
 
+class Folders(ApiModel):
+    """Subfolders of one directory inside home, for picking a new session's cwd."""
+
+    path: str                # "~/Documents/code"
+    parent: str | None       # None at home itself: the browser cannot leave it
+    folders: list[str]       # names, not paths; hidden ones left out
+    truncated: bool = False  # more than folders.MAX_FOLDERS
+
+
 class ActionResult(ApiModel):
     ok: bool = True
     id: str | None = None

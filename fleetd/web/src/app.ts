@@ -1182,6 +1182,76 @@ function fillCwds(): void {
   el("n-cwds", HTMLDataListElement).replaceChildren(...cwds.map((c) => h("option", { value: c })));
   const cwd = el("n-cwd", HTMLInputElement);
   if (!cwd.value && cwds[0]) cwd.value = cwds[0];
+  closeFolderBrowser();
+  const browse = el("n-browse", HTMLButtonElement);
+  browse.disabled = !m || apiLevelOf(m.machine) < MIN_FOLDERS_API;
+  browse.title = browse.disabled ? "Máy này chạy Fleet bản cũ: cập nhật để chọn thư mục" : "Duyệt thư mục trên máy đã chọn";
+}
+
+// ---------------------------------------------------------------- folder picker (new session)
+const MIN_FOLDERS_API = 9;
+interface Folders { path: string; parent: string | null; folders: string[]; truncated: boolean }
+
+function parseFolders(v: unknown): Folders {
+  const o = obj(v);
+  return {
+    path: str(o.path) ?? "~", parent: str(o.parent), truncated: bool(o.truncated),
+    folders: list(o.folders).flatMap((f) => (typeof f === "string" ? [f] : [])),
+  };
+}
+
+let browseSeq = 0;  // a slow reply for a folder already left must not replace the newer listing
+
+function closeFolderBrowser(): void {
+  browseSeq++;
+  el("n-browser", HTMLDivElement).hidden = true;
+  el("n-browse", HTMLButtonElement).setAttribute("aria-expanded", "false");
+}
+
+function toggleFolderBrowser(): void {
+  if (!el("n-browser", HTMLDivElement).hidden) { closeFolderBrowser(); return; }
+  el("n-browse", HTMLButtonElement).setAttribute("aria-expanded", "true");
+  void browseFolder(el("n-cwd", HTMLInputElement).value.trim());
+}
+
+async function browseFolder(path: string): Promise<void> {
+  const box = el("n-browser", HTMLDivElement);
+  const machine = el("n-machine", HTMLSelectElement).value;
+  const seq = ++browseSeq;
+  box.hidden = false;
+  box.replaceChildren(h("div", { class: "fb-note muted" }, "Đang tải…"));
+  try {
+    const query = new URLSearchParams({ path });
+    const folders = parseFolders(await api(`/api/m/${encodeURIComponent(machine)}/folders?${query}`));
+    if (seq === browseSeq) renderFolders(box, folders);
+  } catch (err) {
+    if (seq !== browseSeq || err instanceof Unauthorized) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    // A half-typed path usually does not exist: offer home instead of a dead end.
+    box.replaceChildren(h("div", { class: "fb-note error" }, `Không mở được ${path || "~"}: ${msg}`),
+      ...(path ? [h("div", { class: "fb-note" },
+        h("button", { type: "button", onclick: () => { void browseFolder(""); } }, "Mở thư mục home (~)"))] : []));
+  }
+}
+
+function renderFolders(box: HTMLDivElement, f: Folders): void {
+  const parent = f.parent;
+  const up = h("button", {
+    type: "button", class: "ghost", "aria-label": "Lên thư mục cha", title: parent ?? "Đang ở thư mục home",
+    onclick: () => { if (parent) void browseFolder(parent); },
+  }, "↑");
+  up.disabled = parent === null;
+  const choose = h("button", {
+    type: "button", class: "primary",
+    onclick: () => { el("n-cwd", HTMLInputElement).value = f.path; closeFolderBrowser(); },
+  }, "Chọn");
+  const items = f.folders.map((name) => h("li", {},
+    h("button", { type: "button", onclick: () => { void browseFolder(`${f.path}/${name}`); } }, `📁 ${name}`)));
+  box.replaceChildren(
+    h("div", { class: "fb-head" }, up, h("code", { class: "fb-path" }, f.path), choose),
+    items.length ? h("ul", { "aria-label": `Thư mục con của ${f.path}` }, items)
+      : h("div", { class: "fb-note muted" }, "Không có thư mục con."),
+    ...(f.truncated ? [h("div", { class: "fb-note muted" }, `Chỉ hiện ${f.folders.length} thư mục đầu tiên.`)] : []));
 }
 
 async function startSession(e: Event): Promise<void> {
@@ -1341,6 +1411,7 @@ function wire(): void {
   el("new-session", HTMLButtonElement).addEventListener("click", openNewSession);
   el("n-close", HTMLButtonElement).addEventListener("click", () => { el("modal", HTMLDivElement).hidden = true; });
   el("n-machine", HTMLSelectElement).addEventListener("change", fillCwds);
+  el("n-browse", HTMLButtonElement).addEventListener("click", toggleFolderBrowser);
   el("new-form", HTMLFormElement).addEventListener("submit", (e) => { void startSession(e); });
   el("q", HTMLInputElement).addEventListener("input", render);
   const hist = el("show-history", HTMLInputElement);
