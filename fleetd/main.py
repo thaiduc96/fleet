@@ -31,6 +31,7 @@ from fleetd.actions import ActionError, Actions, check_id
 from fleetd.attach import Attacher, AttachError, Choice
 from fleetd.awake import KeepAwake, Spawn, spawn_process
 from fleetd.claude_cli import ID_RE, ClaudeCLI, CLIError
+from fleetd.folders import list_folders
 from fleetd.handoff import Git, Handoff, run_git
 from fleetd.models import (
     ActionResult,
@@ -38,6 +39,7 @@ from fleetd.models import (
     AwakeBody,
     AwakeMode,
     Fleet,
+    Folders,
     HandoffBody,
     HandoffBundle,
     HandoffResult,
@@ -561,6 +563,24 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     async def m_remove(machine: str, ident: str) -> Response:
         check_id(ident)
         return await on_machine(machine, "DELETE", f"/api/sessions/{ident}", lambda: actions.remove(ident))
+
+    # ---- folder picker for new sessions -----------------------------------
+    @app.get("/api/folders", dependencies=[Depends(require)])
+    def folders(path: str = "") -> Folders:
+        return list_folders(path, cfg.user_home)
+
+    @app.get("/api/m/{machine}/folders", dependencies=[Depends(require)])
+    async def m_folders(machine: str, path: str = "") -> Response:
+        if machine == cfg.machine:
+            result = await asyncio.to_thread(list_folders, path, cfg.user_home)
+            return Response(result.model_dump_json(), media_type="application/json")
+        if machine not in peers().peers:
+            raise HTTPException(404, f"unknown machine {machine}")
+        try:
+            r = await peers().get(machine, f"/api/folders?{urlencode({'path': path})}")
+        except httpx.HTTPError as e:
+            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+        return relay(machine, r)
 
     # ---- attachments -----------------------------------------------------
     async def read_upload(request: Request) -> bytes:

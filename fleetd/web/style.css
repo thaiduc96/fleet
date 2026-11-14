@@ -259,3 +259,19 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 /* ---- App support ------------------------------------------------------ */
 .update-all { flex: 1 1 100%; color: var(--accent); font-size: 14px; padding: 4px 6px; text-align: left; }
 .machine .muted { white-space: normal; overflow-wrap: anywhere; }
+
+/* ---- New session: folder picker ---------------------------------------- */
+.field { display: grid; gap: 4px; font-size: 14px; }
+.cwd-row { display: flex; gap: 8px; }
+.cwd-row input { flex: 1; }
+.cwd-row button { flex: none; white-space: nowrap; }
+.folder-browser { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; }
+.folder-browser .fb-head { display: flex; gap: 8px; align-items: center; padding: 6px 8px;
+  border-bottom: 1px solid var(--line); }
+.folder-browser .fb-path { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.folder-browser ul { list-style: none; margin: 0; padding: 4px; max-height: 260px; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; }
+.folder-browser li button { width: 100%; text-align: left; border-color: transparent; background: transparent;
+  min-height: 40px; overflow-wrap: anywhere; }
+.folder-browser li button:hover, .folder-browser li button:focus-visible { background: var(--bg); border-color: var(--line); }
+.folder-browser .fb-note { padding: 8px 12px; }
