@@ -83,6 +83,14 @@ def test_index_links_the_manifest_and_the_ios_icon(make_client: MakeClient) -> N
     assert c.get("/static/icons/apple-touch-icon.png").headers["content-type"] == "image/png"
 
 
+def test_form_fields_are_16px_on_touch_screens_so_ios_does_not_zoom_on_focus() -> None:
+    css = (WEB_DIR / "style.css").read_text()
+
+    touch_field_rule = r"@media \(pointer: coarse\) \{\s*input, textarea, select[^{]*\{ font-size: 16px; \}"
+
+    assert re.search(touch_field_rule, css)
+
+
 # ---------------------------------------------------------------- reload after an update
 def test_page_and_fleet_api_carry_the_same_web_version(make_client: MakeClient) -> None:
     c = make_client()

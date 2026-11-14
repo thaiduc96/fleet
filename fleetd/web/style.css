@@ -289,3 +289,10 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   min-height: 40px; overflow-wrap: anywhere; }
 .folder-browser li button:hover, .folder-browser li button:focus-visible { background: var(--bg); border-color: var(--line); }
 .folder-browser .fb-note { padding: 8px 12px; }
+
+/* iOS Safari zooms the page into any field under 16px when it gets focus, and
+   the zoom stays after the keyboard closes. Fields inherit the 15px body font,
+   so on touch screens they get 16px instead. */
+@media (pointer: coarse) {
+  input, textarea, select, .awake-select select { font-size: 16px; }
+}
