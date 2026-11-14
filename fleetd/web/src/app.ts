@@ -996,14 +996,142 @@ function renderConversation(cur: Live, toBottom: boolean): void {
   keepScroll(() => el("d-body", HTMLDivElement).replaceChildren(...nodes), toBottom);
 }
 
+// An open session is a history entry, so Back closes it instead of leaving Fleet:
+// Safari's swipe from the left edge, Android's back gesture, a desktop Back button.
+const DRAWER_ENTRY = { fleetDrawer: true } as const;
+const isDrawerEntry = (state: unknown): boolean => obj(state).fleetDrawer === true;
+
 function openDrawer(row: Row): void {
   if (drawer && liveKey(drawer.row, drawer.tab) !== liveKey(row, "transcript")) stopLive();  // no stale model/tokens in the head
+  if (!isDrawerEntry(history.state)) history.pushState(DRAWER_ENTRY, "");
   drawer = { row, tab: "transcript" };
   el("drawer", HTMLDivElement).hidden = false;
   renderDrawerHead();
   void loadTab();
 }
-function closeDrawer(): void { drawer = null; stopLive(); messageFiles?.clear(); el("drawer", HTMLDivElement).hidden = true; }
+
+/** ✕, backdrop, Esc, swipe: step back, and popstate hides the drawer. */
+function closeDrawer(): void {
+  if (isDrawerEntry(history.state)) history.back();
+  else hideDrawer();
+}
+
+function hideDrawer(): void {
+  drawer = null; stopLive(); messageFiles?.clear();
+  el("drawer", HTMLDivElement).hidden = true;
+  resetSwipe();
+}
+
+// ---------------------------------------------------------------- swipe back (Home Screen app)
+// The Home Screen app has no browser around it, so iOS gives it no back swipe. Drag
+// from the left edge: the session follows the finger, then slides away if let go far
+// or fast enough, else springs back. In a browser tab the browser's own swipe does
+// this through the history entry above, so this stays off there.
+const EDGE_PX = 30;            // a swipe must start this close to the left edge
+const DECIDE_PX = 8;           // movement before it is known to be sideways, not a scroll
+const FLING_MS = 300;          // on release the finger's speed carries it this much further
+const RESTED_MS = 100;         // a finger that rested this long before lifting has no speed
+const SETTLE_MS = 220;         // matches the .drawer.settling transition in style.css
+const BACKDROP_ALPHA = 0.35;   // matches the .drawer background in style.css
+
+interface Swipe { x0: number; y0: number; width: number; dx: number; t: number; v: number; dragging: boolean }
+let swipe: Swipe | null = null;
+
+function isHomeScreenApp(): boolean {
+  const nav: Navigator & { standalone?: unknown } = navigator;
+  return nav.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+}
+
+/** A drag inside something scrolled sideways (terminal, code, table) scrolls it back instead. */
+function inSidewaysScroll(target: EventTarget | null): boolean {
+  for (let n = target instanceof Element ? target : null; n; n = n.parentElement) {
+    if (n.scrollLeft > 0) return true;
+  }
+  return false;
+}
+
+function onSwipeStart(e: TouchEvent): void {
+  swipe = null;
+  const t = e.touches[0];
+  const settling = el("drawer", HTMLDivElement).classList.contains("settling");
+  if (!drawer || settling || e.touches.length !== 1 || !t || t.clientX > EDGE_PX || inSidewaysScroll(e.target)) return;
+  const width = el("d-panel", HTMLDivElement).offsetWidth;
+  swipe = { x0: t.clientX, y0: t.clientY, width, dx: 0, t: e.timeStamp, v: 0, dragging: false };
+}
+
+function onSwipeMove(e: TouchEvent): void {
+  const t = e.touches[0];
+  if (!swipe || !t) return;
+  const dx = t.clientX - swipe.x0;
+  if (!swipe.dragging) {
+    const dy = t.clientY - swipe.y0;
+    if (Math.hypot(dx, dy) < DECIDE_PX) return;
+    if (dx <= Math.abs(dy)) { swipe = null; return; }  // a scroll, leave it alone
+    swipe.dragging = true;
+    el("drawer", HTMLDivElement).classList.add("swiping");
+  }
+  e.preventDefault();  // nothing scrolls under the finger while the panel follows it
+  trackSwipe(swipe, Math.max(0, dx), e.timeStamp);
+  paintSwipe(swipe.dx, swipe.width);
+}
+
+function trackSwipe(s: Swipe, dx: number, t: number): void {
+  const dt = t - s.t;
+  if (dt > 0) s.v = 0.8 * ((dx - s.dx) / dt) + 0.2 * s.v;
+  s.dx = dx;
+  s.t = t;
+}
+
+function onSwipeEnd(e: TouchEvent): void {
+  const s = swipe;
+  swipe = null;
+  if (!s?.dragging) return;
+  const v = e.timeStamp - s.t > RESTED_MS ? 0 : s.v;
+  settleSwipe(s.dx + v * FLING_MS > s.width / 2 ? s.width : 0, s.width);
+}
+
+function onSwipeCancel(): void {
+  const s = swipe;
+  swipe = null;
+  if (s?.dragging) settleSwipe(0, s.width);
+}
+
+function paintSwipe(dx: number, width: number): void {
+  el("d-panel", HTMLDivElement).style.transform = `translateX(${dx}px)`;
+  el("drawer", HTMLDivElement).style.backgroundColor = `rgb(0 0 0 / ${BACKDROP_ALPHA * (1 - Math.min(1, dx / width))})`;
+}
+
+/** Let go: slide to `dx` (0 = back in place, width = off screen), then close or tidy up. */
+function settleSwipe(dx: number, width: number): void {
+  const open = drawer;
+  el("drawer", HTMLDivElement).classList.replace("swiping", "settling");
+  paintSwipe(dx, width);
+  window.setTimeout(() => {
+    if (drawer !== open) return;  // closed (or another session opened) meanwhile
+    if (dx > 0) closeDrawer();
+    else resetSwipe();
+  }, SETTLE_MS);
+}
+
+function resetSwipe(): void {
+  swipe = null;
+  const box = el("drawer", HTMLDivElement);
+  box.classList.remove("swiping", "settling");
+  box.style.backgroundColor = "";
+  el("d-panel", HTMLDivElement).style.transform = "";
+}
+
+function wireBackNavigation(): void {
+  // A reload shows the list: a drawer entry left from before would make ✕ step back out of the page.
+  if (isDrawerEntry(history.state)) history.replaceState(null, "");
+  window.addEventListener("popstate", (e) => { if (drawer && !isDrawerEntry(e.state)) hideDrawer(); });
+  if (!isHomeScreenApp()) return;
+  const box = el("drawer", HTMLDivElement);
+  box.addEventListener("touchstart", onSwipeStart, { passive: true });
+  box.addEventListener("touchmove", onSwipeMove, { passive: false });
+  box.addEventListener("touchend", onSwipeEnd);
+  box.addEventListener("touchcancel", onSwipeCancel);
+}
 
 async function sendMessage(e: Event): Promise<void> {
   e.preventDefault();
@@ -1445,6 +1573,7 @@ function wire(): void {
   }
   el("login-form", HTMLFormElement).addEventListener("submit", (e) => { void login(e); });
   el("d-close", HTMLButtonElement).addEventListener("click", closeDrawer);
+  wireBackNavigation();
   el("d-reload", HTMLButtonElement).addEventListener("click", () => { void loadTab(); });
   document.addEventListener("click", (e) => { closeMoreMenus(e.target instanceof Node ? e.target : undefined); });
   el("drawer", HTMLDivElement).addEventListener("click", (e) => { if (e.target === e.currentTarget) closeDrawer(); });
