@@ -79,3 +79,11 @@ def test_index_links_the_manifest_and_the_ios_icon(make_client: MakeClient) -> N
     assert '<link rel="manifest" href="/manifest.webmanifest">' in html
     assert '<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">' in html
     assert c.get("/static/icons/apple-touch-icon.png").headers["content-type"] == "image/png"
+
+
+def test_form_fields_are_16px_on_touch_screens_so_ios_does_not_zoom_on_focus() -> None:
+    css = (WEB_DIR / "style.css").read_text()
+
+    touch_field_rule = r"@media \(pointer: coarse\) \{\s*input, textarea, select[^{]*\{ font-size: 16px; \}"
+
+    assert re.search(touch_field_rule, css)

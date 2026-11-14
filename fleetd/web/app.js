@@ -1141,7 +1141,13 @@ function openNewSession() {
         sel.value = preferred;
     fillCwds();
     el("modal", HTMLDivElement).hidden = false;
-    el("n-prompt", HTMLTextAreaElement).focus();
+    // On a phone, focusing opens the keyboard over the form before the user has
+    // picked a machine or folder; they tap the prompt themselves when ready.
+    if (!isTouchScreen())
+        el("n-prompt", HTMLTextAreaElement).focus();
+}
+function isTouchScreen() {
+    return window.matchMedia("(pointer: coarse)").matches;
 }
 function fillCwds() {
     const m = fleet?.machines.find((x) => x.machine === el("n-machine", HTMLSelectElement).value);
