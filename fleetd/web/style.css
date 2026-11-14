@@ -83,11 +83,29 @@ main { padding: 8px 16px 40px; max-width: 1100px; }
 .drawer-panel > header { display: flex; justify-content: space-between; gap: 8px; padding: 14px 16px;
   padding-top: max(14px, env(safe-area-inset-top)); border-bottom: 1px solid var(--line); }
 .drawer-panel h2 { margin: 0; font-size: 17px; word-break: break-word; }
-.tabs { display: flex; gap: 4px; padding: 8px 16px 0; }
+.tabbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 8px 16px 0; }
+.tabs { display: flex; gap: 4px; }
+.tabbar .reload { font-size: 18px; line-height: 1; min-width: 40px; min-height: 36px; padding: 4px 8px; }
 .tabs button { border-radius: 8px 8px 0 0; border-bottom: none; }
 .tabs button.active { background: var(--panel); font-weight: 600; }
-.actions { display: flex; gap: 8px; padding: 8px 16px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
-.actions a { color: var(--accent); font-size: 14px; align-self: center; }
+.actions { display: flex; gap: 8px; padding: 8px 16px; flex-wrap: wrap; align-items: center;
+  border-bottom: 1px solid var(--line); }
+.actions button, .more > summary { min-height: 36px; }
+/* Secondary actions: one "Thêm" button at the row's right end, opening a menu that stays on screen. */
+.more { position: relative; margin-left: auto; }
+.more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; user-select: none; }
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::after { content: "▾"; font-size: 12px; color: var(--muted); }
+.more > summary:hover, .more[open] > summary { border-color: var(--muted); }
+.more .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: grid; gap: 2px;
+  width: max-content; min-width: 200px; max-width: calc(100vw - 32px); padding: 4px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgb(0 0 0 / .15); }
+.more .menu > * { display: block; width: 100%; min-height: 40px; padding: 8px 12px; text-align: left; font-size: 14px;
+  background: transparent; border: none; border-radius: 6px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; box-sizing: border-box; }
+.more .menu > button:hover, .more .menu > a:hover { background: var(--idle-bg); }
+.more .menu > a { color: var(--accent); text-decoration: none; line-height: 24px; }
 .d-body { overflow: auto; padding: 12px 16px 40px; flex: 1; -webkit-overflow-scrolling: touch; }
 .msg { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel);
   border: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
@@ -249,10 +267,6 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .top h1 { grid-column: 1; }
   .top #q { grid-column: 1 / -1; grid-row: 2; width: 100%; }
   #updated { display: none; }
-  /* drawer: actions scroll sideways instead of stacking 3 rows deep */
-  .actions { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-  .actions > * { flex: none; }
-  .actions::-webkit-scrollbar { display: none; }
   .drawer-panel > header { padding: 10px 8px 10px 16px; padding-top: max(10px, env(safe-area-inset-top)); }
 }
 

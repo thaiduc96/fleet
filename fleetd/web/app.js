@@ -611,6 +611,16 @@ function actionButtons(s) {
     }));
     return out;
 }
+/** Secondary drawer actions behind one button, so the row fits a phone without hidden sideways scrolling. */
+function moreMenu(items, isOpen) {
+    return h("details", { class: "more", open: isOpen }, h("summary", {}, "Thêm"), h("div", { class: "menu" }, items));
+}
+function closeMoreMenus(except) {
+    for (const d of document.querySelectorAll("details.more[open]")) {
+        if (!except || !d.contains(except))
+            d.open = false;
+    }
+}
 function renderCompose(s) {
     const form = el("d-compose", HTMLFormElement);
     const note = el("d-compose-note", HTMLSpanElement);
@@ -638,15 +648,17 @@ function renderDrawerHead() {
         live?.contextTokens ? `${Math.round(live.contextTokens / 1000)}k token context` : null,
         ago(s.updatedAt ?? s.startedAt)]
         .filter(Boolean).join(" · ");
-    const acts = [...actionButtons(s)];
+    const extras = [];
     if (s.kind === "background")
-        acts.push(copyBtn("Copy attach", `claude attach ${s.id}`));
+        extras.push(copyBtn("Copy attach", `claude attach ${s.id}`));
     if (s.sessionId)
-        acts.push(copyBtn("Copy resume", `cd ${shortPath(s.cwd)} && claude --resume ${s.sessionId}`));
-    acts.push(...handoffButtons(s));
-    acts.push(h("button", { onclick: () => { void loadTab(); } }, "Tải lại"));
-    acts.push(h("a", { href: "https://claude.ai/code", target: "_blank", rel: "noopener" }, "claude.ai/code ↗"));
-    el("d-actions", HTMLDivElement).replaceChildren(...acts);
+        extras.push(copyBtn("Copy resume", `cd ${shortPath(s.cwd)} && claude --resume ${s.sessionId}`));
+    extras.push(...handoffButtons(s));
+    extras.push(h("a", { href: "https://claude.ai/code", target: "_blank", rel: "noopener" }, "claude.ai/code ↗"));
+    const actions = el("d-actions", HTMLDivElement);
+    // Every refresh rebuilds this row; keep the menu open if the user had opened it.
+    const isMenuOpen = actions.querySelector("details.more")?.open ?? false;
+    actions.replaceChildren(...actionButtons(s), moreMenu(extras, isMenuOpen));
     for (const b of document.querySelectorAll(".tabs button")) {
         b.classList.toggle("active", b.dataset.tab === drawer.tab);
         if (b.dataset.tab === "logs")
@@ -1288,6 +1300,8 @@ function wire() {
     }
     el("login-form", HTMLFormElement).addEventListener("submit", (e) => { void login(e); });
     el("d-close", HTMLButtonElement).addEventListener("click", closeDrawer);
+    el("d-reload", HTMLButtonElement).addEventListener("click", () => { void loadTab(); });
+    document.addEventListener("click", (e) => { closeMoreMenus(e.target instanceof Node ? e.target : undefined); });
     el("drawer", HTMLDivElement).addEventListener("click", (e) => { if (e.target === e.currentTarget)
         closeDrawer(); });
     el("d-compose", HTMLFormElement).addEventListener("submit", (e) => { void sendMessage(e); });
@@ -1315,7 +1329,9 @@ function wire() {
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape")
             return;
-        if (!el("handoff", HTMLDivElement).hidden)
+        if (document.querySelector("details.more[open]"))
+            closeMoreMenus();
+        else if (!el("handoff", HTMLDivElement).hidden)
             el("handoff", HTMLDivElement).hidden = true;
         else if (!el("modal", HTMLDivElement).hidden)
             el("modal", HTMLDivElement).hidden = true;

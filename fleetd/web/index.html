@@ -48,9 +48,12 @@
       </div>
       <button id="d-close" class="ghost icon-close" aria-label="Đóng">✕</button>
     </header>
-    <div class="tabs" role="tablist">
-      <button data-tab="transcript" class="active" role="tab">Hội thoại</button>
-      <button data-tab="logs" role="tab">Terminal</button>
+    <div class="tabbar">
+      <div class="tabs" role="tablist">
+        <button data-tab="transcript" class="active" role="tab">Hội thoại</button>
+        <button data-tab="logs" role="tab">Terminal</button>
+      </div>
+      <button type="button" id="d-reload" class="ghost reload" title="Tải lại" aria-label="Tải lại">↻</button>
     </div>
     <div id="d-actions" class="actions"></div>
     <div id="d-control" class="control" hidden></div>
