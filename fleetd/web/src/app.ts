@@ -1051,6 +1051,7 @@ function inSidewaysScroll(target: EventTarget | null): boolean {
 }
 
 function onSwipeStart(e: TouchEvent): void {
+  if (swipe?.dragging) { onSwipeCancel(); return; }  // a second finger: put the panel back
   swipe = null;
   const t = e.touches[0];
   const settling = el("drawer", HTMLDivElement).classList.contains("settling");
@@ -1121,10 +1122,17 @@ function resetSwipe(): void {
   el("d-panel", HTMLDivElement).style.transform = "";
 }
 
+function onHistoryStep(e: PopStateEvent): void {
+  if (location.hash.startsWith("#s=")) return;  // a session link, not Back: hashchange opens it
+  if (drawer && !isDrawerEntry(e.state)) hideDrawer();
+}
+
 function wireBackNavigation(): void {
   // A reload shows the list: a drawer entry left from before would make ✕ step back out of the page.
   if (isDrawerEntry(history.state)) history.replaceState(null, "");
-  window.addEventListener("popstate", (e) => { if (drawer && !isDrawerEntry(e.state)) hideDrawer(); });
+  window.addEventListener("popstate", onHistoryStep);
+  // A session link (#s=…, from Fleet.app's menu) arriving while the page is open: switch now.
+  window.addEventListener("hashchange", () => { if (fleet) focusFromHash(fleet); });
   if (!isHomeScreenApp()) return;
   const box = el("drawer", HTMLDivElement);
   box.addEventListener("touchstart", onSwipeStart, { passive: true });
