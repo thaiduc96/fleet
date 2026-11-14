@@ -5,9 +5,11 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from fleetd.main import WEB_DIR, versioned_index
+from fleetd.main import WEB_DIR, versioned_index, web_version
+from tests.conftest import AUTH
 
 MakeClient = Callable[..., TestClient]
 
@@ -87,3 +89,24 @@ def test_form_fields_are_16px_on_touch_screens_so_ios_does_not_zoom_on_focus() -
     touch_field_rule = r"@media \(pointer: coarse\) \{\s*input, textarea, select[^{]*\{ font-size: 16px; \}"
 
     assert re.search(touch_field_rule, css)
+
+
+# ---------------------------------------------------------------- reload after an update
+def test_page_and_fleet_api_carry_the_same_web_version(make_client: MakeClient) -> None:
+    c = make_client()
+
+    html, fleet = c.get("/").text, c.get("/api/fleet", headers=AUTH).json()
+
+    assert f'<meta name="fleet-web-version" content="{fleet["webVersion"]}">' in html
+
+
+@pytest.mark.parametrize("changed", ["index.html", "app.js", "style.css"])
+def test_changing_any_dashboard_file_changes_the_web_version(tmp_path: Path, changed: str) -> None:
+    for name in ("index.html", "app.js", "style.css"):
+        (tmp_path / name).write_text("v1")
+    before = web_version(tmp_path)
+    (tmp_path / changed).write_text("v2")
+
+    after = web_version(tmp_path)
+
+    assert before != after

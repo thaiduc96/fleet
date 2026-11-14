@@ -29,7 +29,7 @@ interface Machine {
   history: Session[]; error: string | null;
   apiLevel: number; isSelf: boolean; appVersion: string | null;
 }
-interface Fleet { machines: Machine[] }
+interface Fleet { machines: Machine[]; webVersion: string }
 /** Markdown parsed by fleetd (fleetd/markdown.py); rendered with DOM nodes, never innerHTML. */
 type Inline =
   | { type: "text" | "code"; text: string }
@@ -139,7 +139,7 @@ function parseMachine(v: unknown): Machine {
   };
 }
 
-const parseFleet = (v: unknown): Fleet => ({ machines: list(obj(v).machines).map(parseMachine) });
+const parseFleet = (v: unknown): Fleet => ({ machines: list(obj(v).machines).map(parseMachine), webVersion: str(obj(v).webVersion) ?? "" });
 
 const SAFE_HREF = /^(https?:|mailto:)/i;
 
@@ -351,6 +351,8 @@ class Attachments {
 
   clear(): void { this.files = []; this.picker.value = ""; this.render(); }
 
+  get isEmpty(): boolean { return !this.files.length; }
+
   /** Upload every file to `machine`; returns their saved paths, or throws naming the file that failed. */
   async upload(machine: string): Promise<string[]> {
     const paths: string[] = [];
@@ -495,6 +497,7 @@ function focusFromHash(f: Fleet): void {
 async function refresh(): Promise<void> {
   try {
     const f = parseFleet(await api("/api/fleet"));
+    reloadIfOutdated(f.webVersion);
     fleet = f;
     notifyChanges(f);
     render();
@@ -503,6 +506,32 @@ async function refresh(): Promise<void> {
   } catch (e) {
     if (!(e instanceof Unauthorized)) el("updated", HTMLSpanElement).textContent = `lỗi: ${String(e)}`;
   }
+}
+
+// ---------------------------------------------------------------- reload after an update
+// fleetd serves a new page after an update, but an open tab, and above all the iPhone
+// app (iOS keeps it in memory for days), keeps running the old script. Reload as soon as
+// nothing typed would be lost; until then each poll tries again.
+const PAGE_VERSION = document.querySelector<HTMLMetaElement>('meta[name="fleet-web-version"]')?.content ?? "";
+const RELOADED_FOR_KEY = "fleet.reloadedFor";
+
+function reloadIfOutdated(serverVersion: string): void {
+  if (!PAGE_VERSION || !serverVersion || serverVersion === PAGE_VERSION) return;
+  // Already reloaded for this version and still different (a proxy serving an old page): stop, never loop.
+  if (store.get(RELOADED_FOR_KEY, "") === serverVersion) return;
+  if (hasUnsavedInput()) return;
+  store.set(RELOADED_FOR_KEY, serverVersion);
+  // Reopen the session being read after the reload (focusFromHash consumes this).
+  const open = drawer?.row;
+  if (open) history.replaceState(null, "", `#s=${encodeURIComponent(open.machine)}/${encodeURIComponent(open.id)}`);
+  location.reload();
+}
+
+function hasUnsavedInput(): boolean {
+  const dialogOpen = !el("modal", HTMLDivElement).hidden || !el("handoff", HTMLDivElement).hidden;
+  const draft = el("d-text", HTMLTextAreaElement).value.trim() !== "";
+  const files = !(messageFiles?.isEmpty ?? true) || !(sessionFiles?.isEmpty ?? true);
+  return dialogOpen || draft || files;
 }
 
 // ---------------------------------------------------------------- render: list
