@@ -1004,6 +1004,7 @@ const isDrawerEntry = (state: unknown): boolean => obj(state).fleetDrawer === tr
 function openDrawer(row: Row): void {
   if (drawer && liveKey(drawer.row, drawer.tab) !== liveKey(row, "transcript")) stopLive();  // no stale model/tokens in the head
   if (!isDrawerEntry(history.state)) history.pushState(DRAWER_ENTRY, "");
+  resetSwipe();  // a swipe still settling must not leave the new session off screen
   drawer = { row, tab: "transcript" };
   el("drawer", HTMLDivElement).hidden = false;
   renderDrawerHead();
@@ -1132,7 +1133,8 @@ function wireBackNavigation(): void {
   if (isDrawerEntry(history.state)) history.replaceState(null, "");
   window.addEventListener("popstate", onHistoryStep);
   // A session link (#s=…, from Fleet.app's menu) arriving while the page is open: switch now.
-  window.addEventListener("hashchange", () => { if (fleet) focusFromHash(fleet); });
+  // A fresh fetch (it ends in focusFromHash) also finds a session started since the last poll.
+  window.addEventListener("hashchange", () => { if (location.hash.startsWith("#s=")) void refresh(); });
   if (!isHomeScreenApp()) return;
   const box = el("drawer", HTMLDivElement);
   box.addEventListener("touchstart", onSwipeStart, { passive: true });
