@@ -270,6 +270,17 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .drawer-panel > header { padding: 10px 8px 10px 16px; padding-top: max(10px, env(safe-area-inset-top)); }
 }
 
+/* ---- Swipe back (Home Screen app) --------------------------------------
+   The panel follows the finger (inline transform set by app.ts); on release it
+   slides home or off screen. 220ms and the .35 backdrop are mirrored in app.ts. */
+.drawer.swiping, .drawer.settling { -webkit-user-select: none; user-select: none; }
+.drawer.swiping .drawer-panel, .drawer.settling .drawer-panel { box-shadow: -8px 0 28px rgb(0 0 0 / .18); }
+.drawer.settling { transition: background-color .22s ease-out; }
+.drawer.settling .drawer-panel { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .drawer.settling, .drawer.settling .drawer-panel { transition: none; }
+}
+
 /* ---- App support ------------------------------------------------------ */
 .update-all { flex: 1 1 100%; color: var(--accent); font-size: 14px; padding: 4px 6px; text-align: left; }
 .machine .muted { white-space: normal; overflow-wrap: anywhere; }
