@@ -29,7 +29,10 @@ cp "app/.build/release/Fleet" "$APP/Contents/MacOS/Fleet"
 
 echo "→ bundling Python $PYVER"
 "$UV" python install --quiet "$PYVER"
-PY_BIN="$("$UV" python find --managed-python "$PYVER")"
+# --system: otherwise uv returns a .venv found in the repo or any parent directory
+# (e.g. a worktree nested in the main checkout); copying that venv puts a symlink
+# pointing outside the bundle into the app, and codesign rejects it.
+PY_BIN="$("$UV" python find --managed-python --system "$PYVER")"
 PY_ROOT="$(cd "$(dirname "$PY_BIN")/.." && pwd -P)"
 cp -R "$PY_ROOT" "$APP/Contents/Resources/backend/python"
 BPY="$APP/Contents/Resources/backend/python/bin/python3"
