@@ -211,10 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     /// Both menus auto-enable their items, which ignores `isEnabled`; this keeps items that
-    /// need a configured Fleet disabled until setup is done.
+    /// need a configured Fleet disabled until setup is done, and the update check
+    /// disabled while an update is running.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(openSettings), #selector(openInvite): Setup.isConfigured
+        case #selector(checkUpdate): !updater.busy
         default: true
         }
     }
