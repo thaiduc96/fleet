@@ -3,7 +3,7 @@ import SwiftUI
 import FleetCore
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let backend = Backend()
     private let notifier = Notifier()
     private let dashboard = DashboardWindow()
@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        NSApp.mainMenu = MainMenu.make(settingsTarget: self, openSettings: #selector(openSettings))
         observeWindowsForDock()
         notifier.onOpen = { [weak self] key in self?.dashboard.show(focus: key) }
         notifier.setUp()
@@ -207,6 +208,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         _ = add("Fleet \(Env.appVersion)", nil, enabled: false)
         _ = add("Thoát Fleet", #selector(quit), key: "q")
+    }
+
+    /// Both menus auto-enable their items, which ignores `isEnabled`; this keeps items that
+    /// need a configured Fleet disabled until setup is done.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(openSettings), #selector(openInvite): Setup.isConfigured
+        default: true
+        }
     }
 
     // MARK: actions
