@@ -6,6 +6,8 @@ final class DashboardWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, W
     private var window: NSWindow?
     private var webView: WKWebView?
 
+    var isOpen: Bool { window?.isOpenForDock ?? false }
+
     func show(focus key: String? = nil) {
         if window == nil { build() }
         load(focus: key)

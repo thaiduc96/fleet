@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        observeWindowsForDock()
         notifier.onOpen = { [weak self] key in self?.dashboard.show(focus: key) }
         notifier.setUp()
         backend.onChange = { [weak self] _ in self?.render() }
@@ -101,6 +102,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if await Shell.background({ Backend.portOwner() }) == .nobody { return }
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
+    }
+
+    // MARK: Dock
+
+    /// A menu bar app has no Dock icon and is not in ⌘Tab. While one of our windows is
+    /// open (or minimised) it should be, otherwise that window is hard to get back to.
+    private func observeWindowsForDock() {
+        let center = NotificationCenter.default
+        center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateDockPresence() }
+        }
+        center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] _ in
+            // The closing window still reports itself visible until this notification returns.
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateDockPresence() } }
+        }
+    }
+
+    private func updateDockPresence() {
+        let hasOpenWindow = dashboard.isOpen || windows.values.contains { $0.isOpenForDock }
+        let policy: NSApplication.ActivationPolicy = hasOpenWindow ? .regular : .accessory
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }
 
     // MARK: polling
@@ -250,4 +272,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
     }
+}
+
+extension NSWindow {
+    /// Shown, or minimised into the Dock: either way the user still has this window.
+    var isOpenForDock: Bool { isVisible || isMiniaturized }
 }
