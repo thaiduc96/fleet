@@ -85,3 +85,14 @@ def test_machine_route_returns_504_when_peer_unreachable(make_client: MakeClient
     r = c.get("/api/m/work/sessions/w1/logs", headers=AUTH)
 
     assert r.status_code == 504
+
+
+def test_machine_route_names_a_connection_error_that_has_no_message(make_client: MakeClient) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("", request=req)
+
+    c = make_client(peers=(WORK,), peer_handler=handler)
+
+    r = c.get("/api/m/work/sessions/w1/logs", headers=AUTH)
+
+    assert (r.status_code, r.json()["detail"]) == (504, "work unreachable: ConnectTimeout")

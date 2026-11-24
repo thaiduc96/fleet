@@ -134,6 +134,15 @@ class Runtime:
     peers: PeerClient | None = field(default=None)
 
 
+def peer_failure(machine: str, e: httpx.HTTPError) -> HTTPException:
+    """504 for a peer call that raised. A read timeout means the peer took the request
+    but did not answer (e.g. its macOS is waiting on a privacy prompt), which "unreachable"
+    would misreport; httpx timeouts also carry no message, so name the error instead."""
+    if isinstance(e, httpx.ReadTimeout):
+        return HTTPException(504, f"{machine} vẫn kết nối được nhưng không trả lời kịp")
+    return HTTPException(504, f"{machine} unreachable: {str(e) or type(e).__name__}")
+
+
 def _config_from_env() -> config.Config:
     path = os.environ.get("FLEET_CONFIG")
     return config.load(Path(path) if path else None)
@@ -238,7 +247,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
             r = await (peers().request(machine, method, path, payload, timeout=timeout) if timeout
                        else peers().request(machine, method, path, payload))
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     def relay(machine: str, r: httpx.Response) -> Response:
@@ -366,7 +375,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         try:
             r = await peers().request(machine, "POST", "/api/update")
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     @app.get("/api/sessions/{session_id}/transcript", dependencies=[Depends(require)])
@@ -405,7 +414,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         try:
             r = await peers().get(machine, path, timeout=SCREEN_TIMEOUT if what == "screen" else None)
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     # ---- control (Phase 2) -----------------------------------------------
@@ -545,7 +554,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         try:
             r = await peers().request(machine, "POST", "/api/awake", body.model_dump(by_alias=True))
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     @app.post("/api/m/{machine}/sessions", dependencies=[Depends(require_write)])
@@ -593,7 +602,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         try:
             r = await peers().get(machine, f"/api/folders?{urlencode({'path': path})}")
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     # ---- attachments -----------------------------------------------------
@@ -627,7 +636,7 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
         try:
             r = await peers().upload(machine, name, data)
         except httpx.HTTPError as e:
-            raise HTTPException(504, f"{machine} unreachable: {e}") from e
+            raise peer_failure(machine, e) from e
         return relay(machine, r)
 
     # ---- dashboard -------------------------------------------------------
