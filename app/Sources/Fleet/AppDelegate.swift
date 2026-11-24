@@ -31,7 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         Updater.cleanUpOldCopy()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "square.stack.3d.up", accessibilityDescription: "Fleet")
+        // The sailboat of the app icon; a system symbol so it follows the menu bar's appearance.
+        statusItem.button?.image = NSImage(systemSymbolName: "sailboat.fill", accessibilityDescription: "Fleet")
         statusItem.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
