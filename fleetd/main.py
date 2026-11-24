@@ -31,7 +31,7 @@ from fleetd.actions import ActionError, Actions, check_id
 from fleetd.attach import Attacher, AttachError, Choice
 from fleetd.awake import KeepAwake, Spawn, spawn_process
 from fleetd.claude_cli import ID_RE, ClaudeCLI, CLIError
-from fleetd.folders import list_folders
+from fleetd.folders import list_folders_in_time
 from fleetd.handoff import Git, Handoff, run_git
 from fleetd.models import (
     ActionResult,
@@ -580,13 +580,13 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
 
     # ---- folder picker for new sessions -----------------------------------
     @app.get("/api/folders", dependencies=[Depends(require)])
-    def folders(path: str = "") -> Folders:
-        return list_folders(path, cfg.user_home)
+    async def folders(path: str = "") -> Folders:
+        return await list_folders_in_time(path, cfg.user_home, cfg.label)
 
     @app.get("/api/m/{machine}/folders", dependencies=[Depends(require)])
     async def m_folders(machine: str, path: str = "") -> Response:
         if machine == cfg.machine:
-            result = await asyncio.to_thread(list_folders, path, cfg.user_home)
+            result = await list_folders_in_time(path, cfg.user_home, cfg.label)
             return Response(result.model_dump_json(), media_type="application/json")
         if machine not in peers().peers:
             raise HTTPException(404, f"unknown machine {machine}")
