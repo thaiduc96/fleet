@@ -107,5 +107,17 @@ def test_peer_without_folder_picker_explains_it_needs_updating(make_client: Make
     assert r.status_code == 404 and "bản cũ" in r.json()["detail"]
 
 
+def test_peer_that_is_too_slow_to_list_folders_is_reported_as_slow_not_unreachable(
+        make_client: MakeClient) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=req)
+
+    c = make_client(peers=(WORK,), peer_handler=handler)
+
+    r = c.get("/api/m/work/folders", params={"path": "~/Documents/code/"}, headers=AUTH)
+
+    assert (r.status_code, r.json()["detail"]) == (504, "work vẫn kết nối được nhưng không trả lời kịp")
+
+
 def test_folders_for_an_unknown_machine_is_404(make_client: MakeClient) -> None:
     assert make_client().get("/api/m/nope/folders", headers=AUTH).status_code == 404
