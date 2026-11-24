@@ -581,12 +581,12 @@ def create_app(cfg: config.Config | None = None, token: str | None = None,
     # ---- folder picker for new sessions -----------------------------------
     @app.get("/api/folders", dependencies=[Depends(require)])
     async def folders(path: str = "") -> Folders:
-        return await list_folders_in_time(path, cfg.user_home, cfg.label)
+        return await list_folders_in_time(path, cfg.user_home, my_label())
 
     @app.get("/api/m/{machine}/folders", dependencies=[Depends(require)])
     async def m_folders(machine: str, path: str = "") -> Response:
         if machine == cfg.machine:
-            result = await list_folders_in_time(path, cfg.user_home, cfg.label)
+            result = await list_folders_in_time(path, cfg.user_home, my_label())
             return Response(result.model_dump_json(), media_type="application/json")
         if machine not in peers().peers:
             raise HTTPException(404, f"unknown machine {machine}")
