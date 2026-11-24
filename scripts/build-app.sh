@@ -72,7 +72,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-if [[ -f app/Fleet.icns ]]; then cp app/Fleet.icns "$APP/Contents/Resources/Fleet.icns"; fi
+# Rendered by scripts/make-icons.swift; a missing icon fails the build instead of shipping a blank one.
+cp app/Fleet.icns "$APP/Contents/Resources/Fleet.icns"
 
 echo "→ codesign (ad-hoc)"
 # Files copied from ~/Documents may still carry Finder/iCloud xattrs that codesign rejects.

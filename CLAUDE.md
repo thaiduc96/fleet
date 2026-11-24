@@ -21,6 +21,7 @@ npm run check                            # type-check the dashboard (npx typescr
 npm run build                            # recompile fleetd/web/app.js after editing fleetd/web/src/app.ts
 swift test --package-path app            # FleetCore tests (test.sh adds flags when only CLT is installed)
 scripts/build-app.sh 1.2.3-dev           # dist/Fleet.app + dist/Fleet-<ver>.zip + checksums.txt
+swift scripts/make-icons.swift           # re-render app/Fleet.icns + fleetd/web/icons (both committed)
 uv run fleetd                            # run the backend (config from FLEET_CONFIG or ~/.fleet/config.toml)
 ```
 
