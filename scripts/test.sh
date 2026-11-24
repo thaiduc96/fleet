@@ -21,5 +21,6 @@ if ! xcodebuild -version >/dev/null 2>&1; then
   L=/Library/Developer/CommandLineTools/Library/Developer/usr/lib
   EXTRA=(-Xswiftc -F -Xswiftc "$F" -Xlinker -F -Xlinker "$F" -Xlinker -rpath -Xlinker "$F" -Xlinker -rpath -Xlinker "$L")
 fi
-swift test --package-path app "${EXTRA[@]}"
+# macOS's bash 3.2 treats an empty array as unset under `set -u`, so expand it only when set.
+swift test --package-path app ${EXTRA[@]+"${EXTRA[@]}"}
 echo "✓ all checks passed"
