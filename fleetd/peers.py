@@ -20,6 +20,7 @@ from fleetd.models import MachineSnapshot, PeerInfo
 from fleetd.state import StateFile
 
 log = logging.getLogger(__name__)
+READ_TIMEOUT = 4.0
 WRITE_TIMEOUT = 75.0
 UPLOAD_TIMEOUT = 120.0  # 25 MB over a slow tailnet hop
 # FastAPI's own replies for a route the peer does not have at all.
@@ -189,7 +190,7 @@ class PeerRegistry:
 
 class PeerClient:
     def __init__(self, registry: PeerRegistry, token: str, cache_dir: Path,
-                 client: httpx.AsyncClient | None = None, timeout: float = 4.0) -> None:
+                 client: httpx.AsyncClient | None = None, timeout: float = READ_TIMEOUT) -> None:
         self.registry = registry
         self.cache_dir: Path = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
